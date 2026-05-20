@@ -1,32 +1,36 @@
-//
-//  celestiApp.swift
-//  celesti
-//
-//  Created by gaulatti on 4/6/26.
-//
-
+import AVFoundation
+import CoreText
 import SwiftUI
-import SwiftData
 
 @main
 struct celestiApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+    @StateObject private var appModel = CelestiAppModel()
 
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+    init() {
+        let fonts = [
+            "encode_sans_regular",
+            "encode_sans_semibold",
+            "libre_franklin_medium",
+            "libre_franklin_regular",
+        ]
+        for name in fonts {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf") else {
+                print("Font not found: \(name).ttf")
+                continue
+            }
+            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
         }
-    }()
+
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback)
+        try? session.setActive(true)
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(appModel)
+                .preferredColorScheme(.dark)
         }
-        .modelContainer(sharedModelContainer)
     }
 }
