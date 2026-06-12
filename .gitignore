@@ -1,0 +1,53 @@
+# Xcode
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.xcuserstate
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager – build outputs
+.build/
+build/
+.packages
+
+# SPM binary artifacts (VLCKit.xcframework etc.)
+celesti.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/artifacts/
+# SPM source checkouts
+celesti.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/checkouts/
+# SPM repository clones
+celesti.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/repositories/
+
+# CocoaPods
+Pods/
+!Tests/Pods
+
+# Carthage
+Carthage/
+
+# Tuist
+Tuist/.build
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# Bundler
+vendor/bundle
+.bundle
+
+# macOS
+.DS_Store

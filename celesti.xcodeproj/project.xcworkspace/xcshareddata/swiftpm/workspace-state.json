@@ -1,0 +1,49 @@
+{
+  "object" : {
+    "artifacts" : [
+      {
+        "kind" : {
+          "xcframework" : {
+
+          }
+        },
+        "packageRef" : {
+          "identity" : "vlckit-spm",
+          "kind" : "remoteSourceControl",
+          "location" : "https://github.com/virtualox/vlckit-spm",
+          "name" : "vlckit-spm"
+        },
+        "path" : "/Users/gaulatti/source/gaulatti/celesti/atlantide/celesti.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/artifacts/vlckit-spm/VLCKit/VLCKit.xcframework",
+        "source" : {
+          "checksum" : "6ed0e711d9722d05141fc7bbb63989c1af2a9ee0b99ce5cd626cc787089eeaf1",
+          "type" : "remote",
+          "url" : "https://github.com/virtualox/vlckit-spm/releases/download/4.0.0-alpha.19/VLCKit.xcframework.zip"
+        },
+        "targetName" : "VLCKit"
+      }
+    ],
+    "dependencies" : [
+      {
+        "basedOn" : null,
+        "packageRef" : {
+          "identity" : "vlckit-spm",
+          "kind" : "remoteSourceControl",
+          "location" : "https://github.com/virtualox/vlckit-spm",
+          "name" : "vlckit-spm"
+        },
+        "state" : {
+          "checkoutState" : {
+            "revision" : "1d19105c52515a1d52813923d88515947cdeb3d8",
+            "version" : "4.0.0-alpha.19"
+          },
+          "name" : "sourceControlCheckout"
+        },
+        "subpath" : "vlckit-spm"
+      }
+    ],
+    "prebuilts" : [
+
+    ]
+  },
+  "version" : 7
+}
