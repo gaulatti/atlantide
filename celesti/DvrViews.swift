@@ -17,55 +17,55 @@ struct DvrOverlayView: View {
                 Spacer()
 
                 VStack(spacing: 0) {
-                    HStack(spacing: 16) {
+                    HStack(spacing: 24) {
                         let isLive = playback.duration <= 0
 
                         Text(isLive ? "LIVE" : formatTime(playback.currentTime))
-                            .font(CelestiTypography.body(size: 16, weight: isLive ? .bold : .regular))
-                            .foregroundStyle(isLive ? Color(red: 229 / 255, green: 57 / 255, blue: 57 / 255) : .white)
+                            .font(CelestiTypography.body(size: 24, weight: isLive ? .bold : .regular))
+                            .foregroundStyle(isLive ? Color(red: 229 / 255, green: 57 / 255, blue: 53 / 255) : .white)
                             .monospacedDigit()
 
                         GeometryReader { proxy in
                             ZStack(alignment: .leading) {
                                 Capsule()
                                     .fill(Color.white.opacity(0.3))
-                                    .frame(height: 6)
+                                    .frame(height: 9)
 
                                 Capsule()
-                                    .fill(isLive ? Color(red: 229 / 255, green: 57 / 255, blue: 57 / 255) : .white)
-                                    .frame(width: max(6, proxy.size.width * progress), height: 6)
+                                    .fill(isLive ? Color(red: 229 / 255, green: 57 / 255, blue: 53 / 255) : .white)
+                                    .frame(width: max(9, proxy.size.width * progress), height: 9)
                             }
                         }
-                        .frame(height: 6)
+                        .frame(height: 9)
 
                         if !isLive {
                             Text(formatTime(playback.duration))
-                                .font(CelestiTypography.body(size: 16))
+                                .font(CelestiTypography.body(size: 24))
                                 .foregroundStyle(.white.opacity(0.7))
                                 .monospacedDigit()
                         }
 
                         if playback.qualityTier >= 0, playback.qualityTier < Self.qualityLabels.count {
                             Text(Self.qualityLabels[playback.qualityTier])
-                                .font(CelestiTypography.body(size: 12))
+                                .font(CelestiTypography.body(size: 18))
                                 .foregroundStyle(.white.opacity(0.5))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 3)
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(Color.white.opacity(0.3), lineWidth: 1.5)
                                 )
                         }
                     }
-                    .padding(.horizontal, 48)
-                    .padding(.vertical, 24)
+                    .padding(.horizontal, 72)
+                    .padding(.vertical, 36)
                 }
                 .background(Color.black.opacity(0.6))
             }
 
             if dvrAction != .none {
                 Text(actionSymbol)
-                    .font(.system(size: 72))
+                    .font(.system(size: 108))
                     .foregroundStyle(.white.opacity(0.8))
             }
         }
@@ -116,47 +116,48 @@ struct PlaybackFailedView: View {
             VStack(spacing: 0) {
                 VStack(spacing: 0) {
                     Text("PLAYBACK FAILED")
-                        .font(CelestiTypography.body(size: 12, weight: .bold))
-                        .tracking(6)
+                        .font(CelestiTypography.body(size: 18, weight: .bold))
+                        .tracking(9)
                         .foregroundStyle(.white.opacity(0.6))
 
-                    Spacer().frame(height: 14)
+                    Spacer().frame(height: 21)
 
                     LinearGradient(
                         colors: [.clear, .white.opacity(0.4), .clear],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
-                    .frame(width: 340, height: 1)
+                    .frame(width: 510, height: 1.5)
 
-                    Spacer().frame(height: 24)
+                    Spacer().frame(height: 36)
 
                     Text(streamName ?? "Stream")
-                        .font(CelestiTypography.brand(size: 36, weight: .bold))
+                        .font(CelestiTypography.brand(size: 54, weight: .bold))
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
-                        .lineSpacing(8)
+                        .lineSpacing(12)
 
-                    Spacer().frame(height: 10)
+                    Spacer().frame(height: 15)
 
                     Text("Could not connect to the stream.")
-                        .font(CelestiTypography.body(size: 18, weight: .medium))
+                        .font(CelestiTypography.body(size: 27, weight: .medium))
                         .foregroundStyle(.white.opacity(0.7))
                         .multilineTextAlignment(.center)
 
-                    Spacer().frame(height: 24)
+                    Spacer().frame(height: 36)
 
                     Text("Try again later.")
-                        .font(CelestiTypography.body(size: 14))
+                        .font(CelestiTypography.body(size: 21))
                         .foregroundStyle(.white.opacity(0.5))
                 }
-                .frame(minWidth: 400, maxWidth: 800)
-                .padding(32)
-                .background(Color.black.opacity(0.15), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .frame(minWidth: 600, maxWidth: 1200)
+                .padding(48)
+                .background(Color.black.opacity(0.15), in: RoundedRectangle(cornerRadius: 36, style: .continuous))
 
                 if let onRetry {
-                    Spacer().frame(height: 32)
+                    Spacer().frame(height: 48)
                     Button("Retry", action: onRetry)
+                        .font(CelestiTypography.brand(size: 27))
                         .buttonStyle(.borderedProminent)
                         .tint(.white.opacity(0.3))
                 }

@@ -6,10 +6,23 @@ extension Color {
     static let celestiDesert = Color(red: 193 / 255, green: 129 / 255, blue: 77 / 255)
     static let celestiSunset = Color(red: 1.0, green: 150 / 255, blue: 119 / 255)
     static let celestiSea = Color(red: 44 / 255, green: 87 / 255, blue: 132 / 255)
+    static let celestiDarkModeAccentBlue = Color(red: 91 / 255, green: 163 / 255, blue: 245 / 255)
     static let celestiTextPrimary = Color(red: 45 / 255, green: 45 / 255, blue: 45 / 255)
     static let celestiDarkBackground = Color(red: 13 / 255, green: 24 / 255, blue: 33 / 255)
     static let celestiDarkSurface = Color(red: 26 / 255, green: 35 / 255, blue: 50 / 255)
     static let celestiDarkText = Color(red: 240 / 255, green: 244 / 255, blue: 248 / 255)
+
+    static func celestiPrimary(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? .celestiDarkModeAccentBlue : .celestiSea
+    }
+
+    static func celestiSurface(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? .celestiDarkSurface : .celestiSand
+    }
+
+    static func celestiBackground(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? .celestiDarkBackground : .celestiLightSand
+    }
 }
 
 enum CelestiTypography {
@@ -35,20 +48,22 @@ enum CelestiTypography {
 }
 
 struct CelestiCardModifier: ViewModifier {
-    var cornerRadius: CGFloat = 28
+    var cornerRadius: CGFloat = 42
+    
+    @Environment(\.colorScheme) private var colorScheme
 
     func body(content: Content) -> some View {
         content
-            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .background(Color.celestiSurface(for: colorScheme).opacity(0.05), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 1.5)
             )
     }
 }
 
 extension View {
-    func celestiCard(cornerRadius: CGFloat = 28) -> some View {
+    func celestiCard(cornerRadius: CGFloat = 42) -> some View {
         modifier(CelestiCardModifier(cornerRadius: cornerRadius))
     }
 }
@@ -57,30 +72,34 @@ struct CelestiStatusPill: View {
     let text: String
     let color: Color
 
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 15) {
             Circle()
                 .fill(color)
-                .frame(width: 8, height: 8)
+                .frame(width: 12, height: 12)
 
             Text(text)
-                .font(CelestiTypography.body(size: 12, weight: .semibold))
-                .tracking(1.2)
+                .font(CelestiTypography.body(size: 18, weight: .semibold))
+                .tracking(1.8)
                 .foregroundStyle(Color.primary.opacity(0.82))
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .background(Color.primary.opacity(0.08), in: Capsule())
-        .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+        .padding(.horizontal, 21)
+        .padding(.vertical, 10.5)
+        .background(Color.celestiSurface(for: colorScheme).opacity(0.35), in: Capsule())
+        .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 1.5))
     }
 }
 
 struct CelestiHeader: View {
     var body: some View {
         HStack {
-            HStack(spacing: 16) {
-                CelestiBrandMark()
-                    .frame(width: 32, height: 32)
+            HStack(spacing: 24) {
+                Image("logo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 48, height: 48)
                     .foregroundStyle(Color.primary.opacity(0.9))
 
                 Rectangle()
@@ -91,10 +110,10 @@ struct CelestiHeader: View {
                             endPoint: .bottom
                         )
                     )
-                    .frame(width: 1, height: 32)
+                    .frame(width: 1.5, height: 48)
 
                 Text("celesti")
-                    .font(CelestiTypography.brand(size: 24, weight: .bold))
+                    .font(CelestiTypography.brand(size: 36, weight: .bold))
                     .foregroundStyle(Color.primary)
             }
 
@@ -102,45 +121,13 @@ struct CelestiHeader: View {
 
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 Text(context.date, format: .dateTime.hour().minute().second())
-                    .font(CelestiTypography.body(size: 16, weight: .medium))
-                    .tracking(1.2)
+                    .font(CelestiTypography.body(size: 24, weight: .medium))
+                    .tracking(1.8)
                     .foregroundStyle(Color.primary.opacity(0.76))
             }
         }
-        .padding(.horizontal, 56)
-        .padding(.vertical, 38)
-    }
-}
-
-struct CelestiBrandMark: Shape {
-    func path(in rect: CGRect) -> Path {
-        let diameter = min(rect.width, rect.height)
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let outerRadius = diameter * 0.46
-        let innerRadius = diameter * 0.18
-
-        var path = Path()
-        path.addEllipse(in: CGRect(x: center.x - outerRadius, y: center.y - outerRadius, width: outerRadius * 2, height: outerRadius * 2))
-        path.addEllipse(in: CGRect(x: center.x - innerRadius, y: center.y - innerRadius, width: innerRadius * 2, height: innerRadius * 2))
-
-        let wedges: [(CGFloat, CGFloat)] = [(-140, -40), (40, 140)]
-        for (startDegrees, endDegrees) in wedges {
-            var wedge = Path()
-            wedge.addArc(center: center, radius: outerRadius, startAngle: .degrees(startDegrees), endAngle: .degrees(endDegrees), clockwise: false)
-            wedge.addArc(center: center, radius: diameter * 0.64, startAngle: .degrees(endDegrees), endAngle: .degrees(startDegrees), clockwise: true)
-            wedge.closeSubpath()
-            path.addPath(wedge)
-        }
-
-        return path.eoFilled()
-    }
-}
-
-private extension Path {
-    func eoFilled() -> Path {
-        var copy = self
-        copy = copy.strokedPath(.init(lineWidth: 0))
-        return self
+        .padding(.horizontal, 84)
+        .padding(.vertical, 57)
     }
 }
 
@@ -148,10 +135,15 @@ struct CelestiAmbientBackground: View {
     let includeGradient: Bool
 
     @Environment(\.colorScheme) private var colorScheme
-    @State private var animate = false
+    @State private var animateBg1 = false
+    @State private var animateBg2 = false
 
     private var backgroundBase: Color {
-        colorScheme == .dark ? .celestiDarkBackground : .celestiLightSand
+        Color.celestiBackground(for: colorScheme)
+    }
+
+    private var themePrimary: Color {
+        Color.celestiPrimary(for: colorScheme)
     }
 
     var body: some View {
@@ -161,20 +153,24 @@ struct CelestiAmbientBackground: View {
 
             if includeGradient {
                 LinearGradient(
-                    colors: [
-                        Color.primary.opacity(animate ? 0.25 : 0.12),
-                        Color.celestiSunset.opacity(animate ? 0.12 : 0.04),
-                        backgroundBase
+                    stops: [
+                        .init(color: animateBg1 ? themePrimary.opacity(0.28) : backgroundBase, location: 0),
+                        .init(color: animateBg2 ? backgroundBase : themePrimary.opacity(0.22), location: 0.5),
+                        .init(color: backgroundBase, location: 1)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
                 .ignoresSafeArea()
-                .animation(.linear(duration: 8).repeatForever(autoreverses: true), value: animate)
+                .onAppear {
+                    withAnimation(.linear(duration: 8).repeatForever(autoreverses: true)) {
+                        animateBg1 = true
+                    }
+                    withAnimation(.linear(duration: 12).repeatForever(autoreverses: true)) {
+                        animateBg2 = true
+                    }
+                }
             }
-        }
-        .onAppear {
-            animate = true
         }
     }
 }

@@ -6,6 +6,7 @@ import OSLog
 import SwiftUI
 import UIKit
 import Combine
+import VLCKitSPM
 
 private let log = Logger(subsystem: "com.gaulatti.celesti", category: "CelestiStore")
 private let resolverLog = Logger(subsystem: "com.gaulatti.celesti", category: "StreamResolver")
@@ -16,6 +17,13 @@ struct CelestiCommand: Decodable {
     let url: String?
     let title: String?
     let name: String?
+    let deviceCode: String?
+    let nickname: String?
+}
+
+struct CallsignPresentation: Equatable {
+    let deviceCode: String
+    let nickname: String?
 }
 
 enum RegistrationState: Equatable {
@@ -59,6 +67,7 @@ final class CelestiAppModel: ObservableObject {
     @Published var registrationState: RegistrationState = .pending
     @Published var nickname: String?
     @Published var playback: PlaybackPresentation?
+    @Published var callsign: CallsignPresentation?
 
     let deviceId: String
     let playerController: PlayerController
@@ -229,6 +238,18 @@ final class CelestiAppModel: ObservableObject {
         case "stop":
             log.log("Stop command received")
             playerController.stop()
+        case "callsign":
+            log.log("Callsign received: code=\(command.deviceCode ?? "nil", privacy: .public) nickname=\(command.nickname ?? "nil", privacy: .public)")
+            callsign = CallsignPresentation(
+                deviceCode: command.deviceCode ?? "",
+                nickname: command.nickname
+            )
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 6_500_000_000)
+                await MainActor.run {
+                    self?.callsign = nil
+                }
+            }
         case "heartbeat":
             log.debug("Heartbeat received")
             break
@@ -338,6 +359,13 @@ private final class CommandStreamClient {
                             }
                             buffer.append(fragment)
                             sseLog.debug("SSE data fragment: \(fragment, privacy: .public)")
+
+                            // Some SSE servers send single-line JSON events without
+                            // a trailing blank line; decode immediately so the event
+                            // doesn't sit in the buffer until the next event arrives.
+                            if tryDecodeAndDispatch(buffer, onCommand: onCommand) {
+                                buffer = ""
+                            }
                         } else if line.isEmpty {
                             if !buffer.isEmpty {
                                 tryDecodeAndDispatch(buffer, onCommand: onCommand)
@@ -373,20 +401,25 @@ private final class CommandStreamClient {
         streamTask = nil
     }
 
-    private func tryDecodeAndDispatch(_ buffer: String, onCommand: (CelestiCommand) -> Void) {
+    @discardableResult
+    private func tryDecodeAndDispatch(_ buffer: String, onCommand: (CelestiCommand) -> Void) -> Bool {
         let data = Data(buffer.utf8)
         sseLog.debug("SSE parsing buffer: \(buffer, privacy: .public)")
         if let command = try? JSONDecoder().decode(CelestiCommand.self, from: data) {
             sseLog.log("SSE decoded command: type=\(command.type, privacy: .public)")
             onCommand(command)
+            return true
         } else {
             sseLog.log("SSE buffer is not a CelestiCommand, skipping: \(buffer, privacy: .public)")
+            return false
         }
     }
 }
 
-final class PlayerController: ObservableObject {
+final class PlayerController: NSObject, ObservableObject {
     let player = AVPlayer()
+    @Published var vlcPlayer = VLCMediaPlayer()
+    @Published var isUsingVLC = false
     var onPresentationChanged: ((PlaybackPresentation?) -> Void)?
     var onDvrStateChanged: ((DvrAction?) -> Void)?
 
@@ -404,6 +437,8 @@ final class PlayerController: ObservableObject {
     private var currentRadioName: String?
     private var currentURL: URL?
     private var originalURL: URL?
+    private var currentM3U8File: URL?
+    private var vlcStateObserver: NSObjectProtocol?
 
     // Quality management (0=AUTO, 1=HD, 2=SD, 3=MED, 4=LOW, 5=MIN)
     private var qualityTier: Int = 3 {
@@ -421,6 +456,9 @@ final class PlayerController: ObservableObject {
     private var lastPositionUpdateAt: Date = .distantPast
     private var recoveryAttempt: Int = 0
     private var hasEverReachedReady: Bool = false
+    private var recoveryWorkItem: DispatchWorkItem?
+    private var recoveryTask: Task<Void, Never>?
+    private var playbackStartedAt: Date?
 
     // DVR auto-show tracking
     private var lastKnownTime: Double = 0
@@ -432,11 +470,15 @@ final class PlayerController: ObservableObject {
     private let stableWindowForUpgrade: TimeInterval = 300.0
 
     var isPaused: Bool {
-        player.rate == 0 && player.timeControlStatus != .waitingToPlayAtSpecifiedRate
+        if isUsingVLC {
+            return vlcPlayer.state == .paused || vlcPlayer.state == .stopped
+        }
+        return player.rate == 0 && player.timeControlStatus != .waitingToPlayAtSpecifiedRate
     }
 
     var isPlaybackFailed: Bool = false
     private var failedStreamName: String?
+    private var audioFallbackApplied = false
 
     func playDemo() async {
         let demoURLs = [
@@ -464,6 +506,11 @@ final class PlayerController: ObservableObject {
         updateTask?.cancel()
         updateTask = nil
 
+        recoveryWorkItem?.cancel()
+        recoveryWorkItem = nil
+        recoveryTask?.cancel()
+        recoveryTask = nil
+
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
             self.endObserver = nil
@@ -472,13 +519,28 @@ final class PlayerController: ObservableObject {
             NotificationCenter.default.removeObserver(errorObserver)
             self.errorObserver = nil
         }
+        if let vlcStateObserver {
+            NotificationCenter.default.removeObserver(vlcStateObserver)
+            self.vlcStateObserver = nil
+        }
 
+        if isUsingVLC {
+            vlcPlayer.stop()
+            // Don't nil the media — VLCKit retains it internally
+            // and nil-setting causes libvlc_media_retain assertion
+            // on the next play.
+        }
         player.pause()
         player.replaceCurrentItem(with: nil)
+        isUsingVLC = false
         currentSource = nil
         currentRadioName = nil
         currentURL = nil
         originalURL = nil
+        if let m3u8 = currentM3U8File {
+            try? FileManager.default.removeItem(at: m3u8)
+            currentM3U8File = nil
+        }
         bufferingStartedAt = nil
         lastPlaybackPosition = .zero
         lastPositionUpdateAt = .distantPast
@@ -486,6 +548,7 @@ final class PlayerController: ObservableObject {
         hasEverReachedReady = false
         isPlaybackFailed = false
         failedStreamName = nil
+        audioFallbackApplied = false
         currentPresentation = nil
 
         UIApplication.shared.isIdleTimerDisabled = false
@@ -510,6 +573,14 @@ final class PlayerController: ObservableObject {
             playerLog.log("togglePlayPause: ignored, playback failed")
             return
         }
+        if isUsingVLC {
+            if vlcPlayer.isPlaying {
+                vlcPlayer.pause()
+            } else {
+                vlcPlayer.play()
+            }
+            return
+        }
         let wasPaused = player.timeControlStatus == .paused || player.timeControlStatus == .waitingToPlayAtSpecifiedRate
         playerLog.log("togglePlayPause: wasPaused=\(wasPaused)")
         if wasPaused {
@@ -522,6 +593,10 @@ final class PlayerController: ObservableObject {
     func seek(by seconds: Double) {
         guard !isPlaybackFailed else {
             playerLog.log("seek: ignored, playback failed")
+            return
+        }
+        if isUsingVLC {
+            playerLog.log("seek: VLC seek not supported for live streams")
             return
         }
         guard let item = player.currentItem, item.duration.seconds.isFinite else {
@@ -564,6 +639,7 @@ final class PlayerController: ObservableObject {
 
         playerLog.log("play: url=\(urlString, privacy: .public) name=\(radioName ?? "nil", privacy: .public) source=\(source == .demo ? "demo" : "remote")")
         stop()
+        audioFallbackApplied = false
         originalURL = inputURL
         currentSource = source
         currentRadioName = radioName
@@ -584,6 +660,19 @@ final class PlayerController: ObservableObject {
         currentURL = resolved.url
         playerLog.log("play: resolved URL: \(resolved.url.absoluteString, privacy: .public) headers: \(resolved.headers, privacy: .public)")
 
+        if resolved.contentType == "video/mp2t" || resolved.contentType == "rtmp" || resolved.contentType?.contains("dash+xml") == true || urlString.contains(".mpd") {
+            let format = resolved.contentType == "video/mp2t" ? "MPEG-TS"
+                       : resolved.contentType == "rtmp" ? "RTMP" : "DASH"
+            playerLog.log("play: \(format) detected, using VLC player")
+            playWithVLC(url: resolved.url, radioName: radioName, contentType: resolved.contentType)
+            return
+        }
+
+        if resolved.url.absoluteString.contains("/hls_"), resolved.url.isFileURL {
+            currentM3U8File = resolved.url
+            playerLog.log("play: tracking temp m3u8 file: \(resolved.url.path)")
+        }
+
         var headers = resolved.headers
         if headers["User-Agent"] == nil {
             headers["User-Agent"] = "VLC/3.0.21 LibVLC/3.0.21"
@@ -592,7 +681,7 @@ final class PlayerController: ObservableObject {
             headers["Accept"] = "*/*"
         }
         if headers["Icy-MetaData"] == nil {
-            headers["Icy-MetaData"] = "0"
+            headers["Icy-MetaData"] = "1"
         }
         playerLog.log("play: headers: \(headers, privacy: .public)")
 
@@ -611,6 +700,7 @@ final class PlayerController: ObservableObject {
         item.add(metadataOutput)
 
         playerLog.log("play: replacing current item and calling play()")
+        playbackStartedAt = Date()
         player.replaceCurrentItem(with: item)
         player.automaticallyWaitsToMinimizeStalling = true
         player.play()
@@ -663,6 +753,69 @@ final class PlayerController: ObservableObject {
         }
     }
 
+    private func playWithVLC(url: URL, radioName: String?, contentType: String? = nil) {
+        // Fresh player each session so video output pipeline is clean.
+        // The old player may still have the previous drawable wired up.
+        vlcPlayer = VLCMediaPlayer()
+        isUsingVLC = true
+
+        guard let media = VLCMedia(url: url) else {
+            playerLog.error("playWithVLC: failed to create VLCMedia")
+            failPlayback()
+            return
+        }
+        media.addOption(":http-user-agent=VLC/3.0.21 LibVLC/3.0.21")
+        if contentType?.contains("dash+xml") == true || url.absoluteString.contains(".mpd") {
+            media.addOption(":demux=dash")
+            playerLog.log("playWithVLC: added DASH demux option")
+        }
+        vlcPlayer.media = media
+
+        vlcStateObserver = NotificationCenter.default.addObserver(
+            forName: VLCMediaPlayer.stateChangedNotification,
+            object: vlcPlayer,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleVLCStateChange()
+        }
+
+        playerLog.log("playWithVLC: starting VLC playback")
+        playbackStartedAt = Date()
+        vlcPlayer.play()
+
+        updateTask = Task { [weak self] in
+            guard let self else { return }
+            playerLog.log("playWithVLC: starting presentation update task")
+            while !Task.isCancelled {
+                self.refreshPresentationState()
+                try? await Task.sleep(nanoseconds: 750_000_000)
+            }
+        }
+
+        UIApplication.shared.isIdleTimerDisabled = true
+    }
+
+    private func handleVLCStateChange() {
+        guard var presentation = currentPresentation else { return }
+        let state = vlcPlayer.state
+        playerLog.log("VLC state: \(state.rawValue)")
+
+        switch state {
+        case .error:
+            playerLog.error("VLC error state, triggering recovery")
+            performEmergencyRecovery(reason: "vlc_error")
+        case .buffering, .opening:
+            presentation.isBuffering = true
+        case .playing:
+            presentation.isBuffering = false
+        case .paused:
+            presentation.isBuffering = false
+        default:
+            break
+        }
+        currentPresentation = presentation
+    }
+
     private func refreshPresentationState() {
         guard var presentation = currentPresentation else {
             playerLog.debug("refreshPresentationState: no current presentation")
@@ -677,6 +830,24 @@ final class PlayerController: ObservableObject {
             return
         }
 
+        if isUsingVLC {
+            let currentTime = (vlcPlayer.time.value?.doubleValue ?? 0) / 1000.0
+            // Once time has advanced, VLC is rendering — clear buffering
+            // even if the internal state still says .buffering (common
+            // for live MPEG-TS streams).
+            if currentTime > 0 {
+                presentation.isBuffering = false
+            }
+            presentation.isPaused = vlcPlayer.state == .paused
+            presentation.currentTime = currentTime
+            if let dur = vlcPlayer.media?.length.value?.doubleValue {
+                presentation.duration = dur / 1000.0
+            }
+            updatePresentationDvr(&presentation)
+            currentPresentation = presentation
+            return
+        }
+
         let item = player.currentItem
         let presentationSize = item?.presentationSize ?? .zero
         let hasVideo = presentationSize != .zero
@@ -688,7 +859,12 @@ final class PlayerController: ObservableObject {
         presentation.qualityTier = qualityTier
 
         if wasBufferingPreviously != presentation.isBuffering {
-            playerLog.log("refreshPresentationState: buffering changed \(wasBufferingPreviously) -> \(presentation.isBuffering), timeControlStatus=\(self.player.timeControlStatus.rawValue)")
+            if let t0 = playbackStartedAt {
+                let elapsed = Date().timeIntervalSince(t0)
+                playerLog.log("refreshPresentationState: buffering changed \(wasBufferingPreviously) -> \(presentation.isBuffering) after \(elapsed, privacy: .public)s, timeControlStatus=\(self.player.timeControlStatus.rawValue)")
+            } else {
+                playerLog.log("refreshPresentationState: buffering changed \(wasBufferingPreviously) -> \(presentation.isBuffering), timeControlStatus=\(self.player.timeControlStatus.rawValue)")
+            }
         }
 
         if let currentItem = item {
@@ -702,12 +878,46 @@ final class PlayerController: ObservableObject {
             presentation.radioName = currentRadioName
         }
 
+        updatePresentationDvr(&presentation)
+        currentPresentation = presentation
+
+        if !isUsingVLC, !audioFallbackApplied {
+            checkAudioTracks()
+        }
+    }
+
+    private func checkAudioTracks() {
+        guard let item = player.currentItem else { return }
+        let tracks = item.tracks
+        let audioTracks = tracks.filter { $0.assetTrack?.mediaType == .audio }
+        guard !audioTracks.isEmpty else { return }
+
+        let enabledAudio = audioTracks.filter { $0.isEnabled }
+        if enabledAudio.isEmpty {
+            playerLog.warning("checkAudioTracks: no audio track enabled, attempting fallback")
+            for track in audioTracks {
+                guard let assetTrack = track.assetTrack else { continue }
+                Task {
+                    let isPlayable = try? await assetTrack.load(.isPlayable)
+                    if isPlayable == true {
+                        track.isEnabled = true
+                        playerLog.log("checkAudioTracks: enabled audio track")
+                        audioFallbackApplied = true
+                    }
+                }
+            }
+        } else {
+            playerLog.debug("checkAudioTracks: \(enabledAudio.count) audio tracks enabled")
+        }
+    }
+
+    private func updatePresentationDvr(_ presentation: inout PlaybackPresentation) {
         let wasBuffering = lastKnownBuffering
         lastKnownBuffering = presentation.isBuffering
 
         if wasBuffering && !presentation.isBuffering {
             onDvrStateChanged?(.play)
-        } else if !wasBuffering && presentation.isBuffering && player.timeControlStatus == .paused {
+        } else if !wasBuffering && presentation.isBuffering && presentation.isPaused {
             onDvrStateChanged?(.pause)
         }
 
@@ -717,8 +927,6 @@ final class PlayerController: ObservableObject {
             onDvrStateChanged?(direction)
         }
         lastKnownTime = presentation.currentTime
-
-        currentPresentation = presentation
     }
 
     // MARK: - Watchdog
@@ -786,7 +994,8 @@ final class PlayerController: ObservableObject {
                 }
             } else {
                 if !hasEverReachedReady {
-                    playerLog.log("checkPlaybackHealth: first position change detected, playback started")
+                    let elapsed = playbackStartedAt.map { Date().timeIntervalSince($0) }
+                    playerLog.log("checkPlaybackHealth: first position change detected after \(elapsed ?? 0, privacy: .public)s, playback started")
                 }
                 lastPlaybackPosition = currentPos
                 lastPositionUpdateAt = Date()
@@ -826,13 +1035,12 @@ final class PlayerController: ObservableObject {
 
         playerLog.log("performEmergencyRecovery: retrying in \(delay)s with re-resolve=\(shouldReResolve)")
 
-        if delay > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.performRetry(shouldReResolve: shouldReResolve)
-            }
-        } else {
-            performRetry(shouldReResolve: shouldReResolve)
+        recoveryWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.performRetry(shouldReResolve: shouldReResolve)
         }
+        recoveryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func performRetry(shouldReResolve: Bool) {
@@ -851,15 +1059,27 @@ final class PlayerController: ObservableObject {
             playerLog.log("performRetry: re-resolving and replaying original URL \(url.absoluteString, privacy: .public)")
             let name = currentRadioName
             let source = currentSource ?? .remoteCommand
-            Task {
+            let task = Task {
                 await play(urlString: url.absoluteString, radioName: name, source: source)
             }
+            recoveryTask = task
+        } else if isUsingVLC, let url = currentURL {
+            playerLog.log("performRetry: restarting VLC with \(url.absoluteString, privacy: .public)")
+            vlcPlayer.stop()
+            guard let media = VLCMedia(url: url) else {
+                playerLog.error("performRetry: failed to create VLCMedia")
+                failPlayback()
+                return
+            }
+            media.addOption(":http-user-agent=VLC/3.0.21 LibVLC/3.0.21")
+            vlcPlayer.media = media
+            vlcPlayer.play()
         } else if let url = currentURL {
             playerLog.log("performRetry: replacing item with current URL \(url.absoluteString, privacy: .public)")
             var headers: [String: String] = [:]
             headers["User-Agent"] = "VLC/3.0.21 LibVLC/3.0.21"
             headers["Accept"] = "*/*"
-            headers["Icy-MetaData"] = "0"
+            headers["Icy-MetaData"] = "1"
 
             let assetOptions: [String: Any]? = ["AVURLAssetHTTPHeaderFieldsKey": headers]
             let asset = AVURLAsset(url: url, options: assetOptions)
@@ -938,27 +1158,145 @@ private final class MetadataCollector: NSObject, AVPlayerItemMetadataOutputPushD
 private struct ResolvedStream {
     let url: URL
     let headers: [String: String]
+    let contentType: String?
+    let playlist: String?
 }
+
+private final class HLSResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
+    private let streamURL: URL
+    private let playlist: String
+
+    init(streamURL: URL, playlist: String) {
+        self.streamURL = streamURL
+        self.playlist = playlist
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader, shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        guard let url = loadingRequest.request.url else {
+            loadingRequest.finishLoading(with: URLError(.badURL))
+            return true
+        }
+
+        if url.lastPathComponent == "playlist" {
+            return respondWithPlaylist(loadingRequest)
+        }
+
+        proxyStream(loadingRequest)
+        return true
+    }
+
+    private func respondWithPlaylist(_ loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        let data = Data(playlist.utf8)
+        if let info = loadingRequest.contentInformationRequest {
+            info.contentType = "application/x-mpegURL"
+            info.contentLength = Int64(data.count)
+            info.isByteRangeAccessSupported = false
+        }
+        loadingRequest.dataRequest?.respond(with: data)
+        loadingRequest.finishLoading()
+        return true
+    }
+
+    private func proxyStream(_ loadingRequest: AVAssetResourceLoadingRequest) {
+        Task {
+            var request = URLRequest(url: streamURL)
+            request.setValue("VLC/3.0.21 LibVLC/3.0.21", forHTTPHeaderField: "User-Agent")
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+            request.setValue("1", forHTTPHeaderField: "Icy-MetaData")
+
+            if let dataRequest = loadingRequest.dataRequest {
+                let length = dataRequest.requestedLength
+                if length > 0 {
+                    let start = dataRequest.requestedOffset
+                    request.setValue("bytes=\(start)-\(start + Int64(length) - 1)", forHTTPHeaderField: "Range")
+                }
+            }
+
+            do {
+                let (bytes, response) = try await URLSession.shared.bytes(for: request)
+
+                if let info = loadingRequest.contentInformationRequest {
+                    info.contentType = response.mimeType ?? "video/mp2t"
+                    info.contentLength = response.expectedContentLength
+                    info.isByteRangeAccessSupported = false
+                }
+
+                var buffer = Data()
+                for try await byte in bytes {
+                    buffer.append(byte)
+                    if buffer.count >= 65536 {
+                        loadingRequest.dataRequest?.respond(with: buffer)
+                        buffer = Data()
+                    }
+                }
+                if !buffer.isEmpty {
+                    loadingRequest.dataRequest?.respond(with: buffer)
+                }
+
+                loadingRequest.finishLoading()
+            } catch {
+                loadingRequest.finishLoading(with: error)
+            }
+        }
+    }
+}
+
+private let m3u8Log = Logger(subsystem: "com.gaulatti.celesti", category: "M3U8Generator")
 
 private final class StreamResolver {
     func resolve(url: URL) async -> ResolvedStream {
-        let path = url.path.lowercased()
-        resolverLog.log("resolve: \(url.absoluteString, privacy: .public) path=\(path, privacy: .public)")
-        guard path.hasSuffix(".m3u") || path.hasSuffix(".m3u8") else {
-            resolverLog.log("resolve: not a playlist, returning original URL")
-            return ResolvedStream(url: url, headers: [:])
-        }
+        resolverLog.log("resolve: \(url.absoluteString, privacy: .public)")
 
         do {
-            resolverLog.log("resolve: fetching playlist content")
-            let request = URLRequest(url: url, timeoutInterval: 15)
-            let (data, _) = try await URLSession.shared.data(for: request)
-            guard let content = String(data: data, encoding: .utf8), content.contains("#EXTM3U") else {
-                resolverLog.log("resolve: not an EXTM3U playlist, returning original URL")
-                return ResolvedStream(url: url, headers: [:])
+            var request = URLRequest(url: url, timeoutInterval: 15)
+            request.setValue("VLC/3.0.21 LibVLC/3.0.21", forHTTPHeaderField: "User-Agent")
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+            request.setValue("1", forHTTPHeaderField: "Icy-MetaData")
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+
+            let contentType = (response as? HTTPURLResponse)?.allHeaderFields["Content-Type"] as? String ?? ""
+            let isLikelyText = contentType.contains("text") ||
+                               contentType.contains("mpegurl") ||
+                               contentType.contains("application/x-mpegurl") ||
+                               url.absoluteString.contains(".m3u")
+
+            // For raw MPEG-TS, return the original URL — PlayerController
+            // routes these to VLCKit (which handles TS natively like
+            // ExoPlayer's TsExtractor).
+            if contentType == "video/mp2t" {
+                resolverLog.log("resolve: content-type=video/mp2t, VLC will handle natively")
+                return ResolvedStream(url: url, headers: [:], contentType: contentType, playlist: nil)
             }
 
-            resolverLog.log("resolve: fetched playlist, size=\(data.count) bytes")
+            // DASH manifest — route to VLCKit for native DASH demux
+            if contentType.contains("dash+xml") || url.absoluteString.contains(".mpd") {
+                resolverLog.log("resolve: DASH manifest detected, VLC will handle")
+                return ResolvedStream(url: url, headers: [:], contentType: contentType, playlist: nil)
+            }
+
+            // RTMP stream — VLCKit handles natively
+            if let scheme = url.scheme?.lowercased(), scheme == "rtmp" || scheme == "rtmps" {
+                resolverLog.log("resolve: RTMP stream detected, VLC will handle")
+                return ResolvedStream(url: url, headers: [:], contentType: "rtmp", playlist: nil)
+            }
+
+            guard isLikelyText else {
+                resolverLog.log("resolve: content-type=\(contentType), not text/playlist, returning original URL")
+                return ResolvedStream(url: url, headers: [:], contentType: contentType, playlist: nil)
+            }
+
+            var data = Data()
+            for try await chunk in bytes {
+                data.append(chunk)
+            }
+
+            let content = String(data: data, encoding: .utf8) ?? ""
+            guard content.contains("#EXTM3U") else {
+                resolverLog.log("resolve: not an EXTM3U playlist, returning original URL")
+                return ResolvedStream(url: url, headers: [:], contentType: contentType, playlist: nil)
+            }
+
+            resolverLog.log("resolve: found #EXTM3U playlist, size=\(data.count) bytes")
 
             var targetURL = url
             var headers: [String: String] = [:]
@@ -980,11 +1318,44 @@ private final class StreamResolver {
             }
 
             resolverLog.log("resolve: resolved to \(targetURL.absoluteString, privacy: .public) with \(headers.count) headers")
-            return ResolvedStream(url: targetURL, headers: headers)
+            return ResolvedStream(url: targetURL, headers: headers, contentType: contentType, playlist: content)
         } catch {
-            resolverLog.error("resolve: failed to fetch playlist: \(error, privacy: .public)")
-            return ResolvedStream(url: url, headers: [:])
+            resolverLog.error("resolve: failed: \(error, privacy: .public)")
+            return ResolvedStream(url: url, headers: [:], contentType: nil, playlist: nil)
         }
+    }
+
+    private static func createTempM3U8(streamURL: URL) -> URL {
+        let dir = FileManager.default.temporaryDirectory
+        let fileURL = dir.appendingPathComponent("hls_\(UUID().uuidString).m3u8")
+
+        let playlist = """
+        #EXTM3U
+        #EXT-X-VERSION:3
+        #EXT-X-TARGETDURATION:10
+        #EXT-X-MEDIA-SEQUENCE:0
+        #EXT-X-PLAYLIST-TYPE:EVENT
+        #EXTINF:10.000,
+        \(streamURL.absoluteString)
+        """
+
+        try? playlist.write(to: fileURL, atomically: true, encoding: .utf8)
+        m3u8Log.log("createTempM3U8: wrote \(fileURL.path)")
+        return fileURL
+    }
+}
+
+struct VLCPlayerView: UIViewRepresentable {
+    let player: VLCMediaPlayer
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        player.drawable = view
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        player.drawable = uiView
     }
 }
 

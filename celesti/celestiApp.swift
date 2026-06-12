@@ -30,7 +30,7 @@ struct celestiApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appModel)
-                .preferredColorScheme(.dark)
+                // .preferredColorScheme(.dark)  // removed for system light/dark support
         }
     }
 }

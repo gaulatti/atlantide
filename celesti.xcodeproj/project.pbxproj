@@ -10,6 +10,25 @@
 		71E425532F847C57003848A2 /* celesti.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = celesti.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		71E425632F84D2C5003848A2 /* XCRemoteSwiftPackageReference "vlckit-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/virtualox/vlckit-spm";
+			requirement = {
+				kind = exactVersion;
+				version = 4.0.0-alpha.19;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		71E425642F84D2C6003848A2 /* VLCKitSPM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 71E425632F84D2C5003848A2 /* XCRemoteSwiftPackageReference "vlckit-spm" */;
+			productName = VLCKitSPM;
+		};
+/* End XCSwiftPackageProductDependency section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		71E425552F847C57003848A2 /* celesti */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
@@ -65,6 +84,7 @@
 			);
 			name = celesti;
 			packageProductDependencies = (
+				71E425642F84D2C6003848A2 /* VLCKitSPM */,
 			);
 			productName = celesti;
 			productReference = 71E425532F847C57003848A2 /* celesti.app */;
@@ -93,6 +113,9 @@
 				Base,
 			);
 			mainGroup = 71E4254A2F847C57003848A2;
+			packageReferences = (
+				71E425632F84D2C5003848A2 /* XCRemoteSwiftPackageReference "vlckit-spm" */,
+			);
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 71E425542F847C57003848A2 /* Products */;
@@ -256,6 +279,7 @@
 				DEVELOPMENT_TEAM = N32N2U54JS;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -285,6 +309,7 @@
 				DEVELOPMENT_TEAM = N32N2U54JS;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
 				LD_RUNPATH_SEARCH_PATHS = (
