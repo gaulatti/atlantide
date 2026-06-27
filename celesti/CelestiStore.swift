@@ -19,6 +19,8 @@ struct CelestiCommand: Decodable {
     let name: String?
     let deviceCode: String?
     let nickname: String?
+    let layoutMode: String?
+    let quadrant: Int?
 }
 
 struct CallsignPresentation: Equatable {
@@ -68,19 +70,23 @@ final class CelestiAppModel: ObservableObject {
     @Published var nickname: String?
     @Published var playback: PlaybackPresentation?
     @Published var callsign: CallsignPresentation?
+    @Published var isQuadActive: Bool = false
 
     let deviceId: String
     let playerController: PlayerController
+    let quadPlayerController: QuadPlayerController
 
     private let registrationService = RegistrationService()
     private let commandStream = CommandStreamClient()
     private var registrationTask: Task<Void, Never>?
     private var started = false
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
         self.deviceId = DeviceIdentityStore.shared.deviceId
         log.log("AppModel init, deviceId: \(self.deviceId, privacy: .public)")
         self.playerController = PlayerController()
+        self.quadPlayerController = QuadPlayerController()
         self.playerController.onPresentationChanged = { [weak self] presentation in
             self?.playback = presentation
         }
@@ -93,6 +99,12 @@ final class CelestiAppModel: ObservableObject {
                 self.dvrAction = .none
             }
         }
+        self.quadPlayerController.$isActive
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] active in
+                self?.isQuadActive = active
+            }
+            .store(in: &cancellables)
     }
 
     func startIfNeeded() {
@@ -111,6 +123,7 @@ final class CelestiAppModel: ObservableObject {
         commandStream.disconnect()
         nickname = nil
         registrationState = .demo
+        quadPlayerController.stopAll()
 
         Task {
             log.log("showDemoMode: starting demo playback")
@@ -121,6 +134,7 @@ final class CelestiAppModel: ObservableObject {
     func exitDemoMode() {
         log.log("exitDemoMode entered")
         playerController.stop()
+        quadPlayerController.stopAll()
         registrationState = .pending
         startRegistrationPolling()
     }
@@ -135,6 +149,7 @@ final class CelestiAppModel: ObservableObject {
         dvrVisible = false
         dvrAction = .none
         playerController.stop()
+        quadPlayerController.stopAll()
     }
 
     func togglePlayPause() {
@@ -170,7 +185,9 @@ final class CelestiAppModel: ObservableObject {
     }
 
     func handleExitCommand() {
-        if playback != nil {
+        if isQuadActive {
+            dismissPlayback()
+        } else if playback != nil {
             dismissPlayback()
         } else if registrationState == .demo {
             exitDemoMode()
@@ -219,7 +236,8 @@ final class CelestiAppModel: ObservableObject {
     }
 
     private func handle(command: CelestiCommand) async {
-        log.log("Received command: type=\(command.type, privacy: .public) videoId=\(command.videoId ?? "nil", privacy: .public) url=\(command.url ?? "nil", privacy: .public) name=\(command.name ?? command.title ?? "nil", privacy: .public)")
+        log.log("Received command: type=\(command.type, privacy: .public) videoId=\(command.videoId ?? "nil", privacy: .public) url=\(command.url ?? "nil", privacy: .public) name=\(command.name ?? command.title ?? "nil", privacy: .public) layoutMode=\(command.layoutMode ?? "nil", privacy: .public) quadrant=\(command.quadrant.map(String.init) ?? "nil", privacy: .public)")
+        let mode = LayoutMode.from(command.layoutMode)
         switch command.type {
         case "youtube":
             guard let videoId = command.videoId, !videoId.isEmpty else {
@@ -227,17 +245,32 @@ final class CelestiAppModel: ObservableObject {
                 return
             }
             log.log("Opening YouTube videoId: \(videoId, privacy: .public)")
+            quadPlayerController.stopAll()
             playerController.openYouTube(videoId: videoId)
         case "m3u":
             guard let url = command.url, !url.isEmpty else {
                 log.error("m3u command missing url")
                 return
             }
-            log.log("Playing m3u stream: url=\(url, privacy: .public) name=\(command.name ?? command.title ?? "unknown", privacy: .public)")
-            await playerController.playStream(urlString: url, radioName: command.name ?? command.title)
+            let streamName = command.name ?? command.title
+            log.log("Playing m3u stream: url=\(url, privacy: .public) name=\(streamName ?? "unknown", privacy: .public) mode=\(mode.rawValue)")
+            if mode == .quad, let quadrant = Quadrant.from(command.quadrant) {
+                playerController.stop()
+                await quadPlayerController.play(urlString: url, name: streamName, quadrant: quadrant)
+            } else {
+                quadPlayerController.stopAll()
+                await playerController.playStream(urlString: url, radioName: streamName)
+            }
         case "stop":
-            log.log("Stop command received")
-            playerController.stop()
+            log.log("Stop command received mode=\(mode.rawValue)")
+            if let quadrant = Quadrant.from(command.quadrant) {
+                quadPlayerController.stop(quadrant: quadrant)
+            } else if mode == .quad {
+                quadPlayerController.stopAll()
+            } else {
+                playerController.stop()
+                quadPlayerController.stopAll()
+            }
         case "callsign":
             log.log("Callsign received: code=\(command.deviceCode ?? "nil", privacy: .public) nickname=\(command.nickname ?? "nil", privacy: .public)")
             callsign = CallsignPresentation(
@@ -526,6 +559,7 @@ final class PlayerController: NSObject, ObservableObject {
 
         if isUsingVLC {
             vlcPlayer.stop()
+            vlcPlayer.drawable = nil
             // Don't nil the media — VLCKit retains it internally
             // and nil-setting causes libvlc_media_retain assertion
             // on the next play.
@@ -754,10 +788,8 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func playWithVLC(url: URL, radioName: String?, contentType: String? = nil) {
-        // Fresh player each session so video output pipeline is clean.
-        // The old player may still have the previous drawable wired up.
-        vlcPlayer = VLCMediaPlayer()
         isUsingVLC = true
+        vlcPlayer.stop()
 
         guard let media = VLCMedia(url: url) else {
             playerLog.error("playWithVLC: failed to create VLCMedia")
@@ -1155,7 +1187,7 @@ private final class MetadataCollector: NSObject, AVPlayerItemMetadataOutputPushD
     }
 }
 
-private struct ResolvedStream {
+struct ResolvedStream {
     let url: URL
     let headers: [String: String]
     let contentType: String?
@@ -1243,7 +1275,7 @@ private final class HLSResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
 
 private let m3u8Log = Logger(subsystem: "com.gaulatti.celesti", category: "M3U8Generator")
 
-private final class StreamResolver {
+final class StreamResolver {
     func resolve(url: URL) async -> ResolvedStream {
         resolverLog.log("resolve: \(url.absoluteString, privacy: .public)")
 

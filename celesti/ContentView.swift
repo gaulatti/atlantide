@@ -11,7 +11,9 @@ struct ContentView: View {
         ZStack {
             CelestiAmbientBackground(includeGradient: appModel.playback == nil)
 
-            if let playback = appModel.playback {
+            if appModel.isQuadActive {
+                QuadPlaybackView()
+            } else if let playback = appModel.playback {
                 PlaybackRootView(playback: playback)
             } else {
                 registrationRoot
