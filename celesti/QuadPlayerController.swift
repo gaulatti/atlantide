@@ -1,12 +1,181 @@
 import AVFoundation
 import Combine
 import Foundation
+import KSPlayer
+import MediaToolbox
 import OSLog
 import SwiftUI
 import UIKit
-import VLCKitSPM
 
 private let quadLog = Logger(subsystem: "com.gaulatti.celesti", category: "QuadPlayer")
+
+private final class AudioPeakMonitor: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peak: Float = 0
+    private var format = AudioStreamBasicDescription()
+    private var attached = false
+    private weak var tappedNode: AVAudioNode?
+
+    func attach(to item: AVPlayerItem, track: AVAssetTrack) {
+        lock.lock()
+        guard !attached else {
+            lock.unlock()
+            return
+        }
+        attached = true
+        lock.unlock()
+
+        var callbacks = MTAudioProcessingTapCallbacks(
+            version: kMTAudioProcessingTapCallbacksVersion_0,
+            clientInfo: Unmanaged.passUnretained(self).toOpaque(),
+            init: { _, clientInfo, storageOut in
+                storageOut.pointee = clientInfo
+            },
+            finalize: nil,
+            prepare: { tap, _, processingFormat in
+                let monitor = Unmanaged<AudioPeakMonitor>
+                    .fromOpaque(MTAudioProcessingTapGetStorage(tap))
+                    .takeUnretainedValue()
+                monitor.setFormat(processingFormat.pointee)
+            },
+            unprepare: nil,
+            process: { tap, numberFrames, _, bufferList, numberFramesOut, flagsOut in
+                let status = MTAudioProcessingTapGetSourceAudio(
+                    tap,
+                    numberFrames,
+                    bufferList,
+                    flagsOut,
+                    nil,
+                    numberFramesOut
+                )
+                guard status == noErr else { return }
+                let monitor = Unmanaged<AudioPeakMonitor>
+                    .fromOpaque(MTAudioProcessingTapGetStorage(tap))
+                    .takeUnretainedValue()
+                monitor.capture(bufferList)
+            }
+        )
+
+        var tap: MTAudioProcessingTap?
+        guard MTAudioProcessingTapCreate(
+            kCFAllocatorDefault,
+            &callbacks,
+            // Capture before AVPlayer mute/volume effects, matching Pioggia's
+            // audio-sink capture so every audio-only cell keeps metering.
+            kMTAudioProcessingTapCreationFlag_PreEffects,
+            &tap
+        ) == noErr, let tap else {
+            markDetached()
+            return
+        }
+
+        let parameters = AVMutableAudioMixInputParameters(track: track)
+        parameters.audioTapProcessor = tap
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = [parameters]
+        item.audioMix = mix
+    }
+
+    func attach(to engine: AVAudioEngine) {
+        lock.lock()
+        guard !attached else {
+            lock.unlock()
+            return
+        }
+        attached = true
+        lock.unlock()
+
+        let node = engine.mainMixerNode
+        tappedNode = node
+        node.installTap(onBus: 0, bufferSize: 1_024, format: nil) { [weak self] buffer, _ in
+            self?.capture(buffer)
+        }
+    }
+
+    func samplePeak() -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        let current = peak
+        peak *= 0.45
+        return current
+    }
+
+    func reset() {
+        tappedNode?.removeTap(onBus: 0)
+        tappedNode = nil
+        lock.lock()
+        peak = 0
+        attached = false
+        lock.unlock()
+    }
+
+    private func markDetached() {
+        lock.lock()
+        attached = false
+        lock.unlock()
+    }
+
+    private func setFormat(_ format: AudioStreamBasicDescription) {
+        lock.lock()
+        self.format = format
+        lock.unlock()
+    }
+
+    private func capture(_ bufferList: UnsafeMutablePointer<AudioBufferList>) {
+        lock.lock()
+        let streamFormat = format
+        lock.unlock()
+
+        var capturedPeak: Float = 0
+        for buffer in UnsafeMutableAudioBufferListPointer(bufferList) {
+            guard let data = buffer.mData else { continue }
+            if streamFormat.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
+                let samples = data.assumingMemoryBound(to: Float.self)
+                let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+                for index in 0..<count {
+                    capturedPeak = max(capturedPeak, abs(samples[index]))
+                }
+            } else if streamFormat.mBitsPerChannel == 16 {
+                let samples = data.assumingMemoryBound(to: Int16.self)
+                let count = Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size
+                for index in 0..<count {
+                    capturedPeak = max(capturedPeak, Float(abs(Int(samples[index]))) / 32_768)
+                }
+            }
+        }
+
+        lock.lock()
+        peak = max(peak, min(1, capturedPeak))
+        lock.unlock()
+    }
+
+    private func capture(_ buffer: AVAudioPCMBuffer) {
+        var capturedPeak: Float = 0
+        let channelCount = Int(buffer.format.channelCount)
+        let frameCount = Int(buffer.frameLength)
+
+        if let channels = buffer.floatChannelData {
+            for channel in 0..<channelCount {
+                for frame in 0..<frameCount {
+                    capturedPeak = max(capturedPeak, abs(channels[channel][frame]))
+                }
+            }
+        } else if let channels = buffer.int16ChannelData {
+            for channel in 0..<channelCount {
+                for frame in 0..<frameCount {
+                    capturedPeak = max(
+                        capturedPeak,
+                        Float(abs(Int(channels[channel][frame]))) / 32_768
+                    )
+                }
+            }
+        }
+
+        lock.lock()
+        peak = max(peak, min(1, capturedPeak))
+        lock.unlock()
+    }
+}
 
 // MARK: - Per-quadrant player
 
@@ -15,25 +184,30 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     let quadrant: Quadrant
 
     let avPlayer = AVPlayer()
-    @Published var vlcPlayer = VLCMediaPlayer()
-    @Published var isUsingVLC = false
+    @Published var ksCoordinator: KSVideoPlayer.Coordinator?
+    @Published var isUsingKSPlayer = false
 
     @Published var isActive = false
     @Published var isBuffering = false
     @Published var isMuted = false
     @Published var isFailed = false
+    @Published var isAudioOnly = false
     @Published var streamName: String?
+    @Published var logoURL: URL?
 
     private var originalURL: URL?
-    private var currentURL: URL?
+    var currentURL: URL?
     private var currentM3U8File: URL?
     private var updateTask: Task<Void, Never>?
+    private var trackDetectionTask: Task<Void, Never>?
+    private var explicitlyAudioOnly = false
     private var errorObserver: NSObjectProtocol?
     private var endObserver: NSObjectProtocol?
-    private var vlcStateObserver: NSObjectProtocol?
+    private let audioPeakMonitor = AudioPeakMonitor()
 
     private let maxBitrate: Double = 800_000
     private var recoveryAttempt = 0
+    private var lastTelemetryBuffering = false
 
     init(quadrant: Quadrant) {
         self.quadrant = quadrant
@@ -41,7 +215,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         avPlayer.isMuted = false
     }
 
-    func play(urlString: String, name: String?) async {
+    func play(urlString: String, name: String?, logoURLString: String? = nil) async {
         guard let inputURL = URL(string: urlString) else {
             quadLog.error("[\(self.quadrant.displayName)] invalid URL: \(urlString, privacy: .public)")
             markFailed()
@@ -53,15 +227,22 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         recoveryAttempt = 0
         originalURL = inputURL
         streamName = name ?? inputURL.lastPathComponent
+        logoURL = logoURLString.flatMap(URL.init(string:))
         isActive = true
         isBuffering = true
         isFailed = false
+        isAudioOnly = false
 
         let resolved = await StreamResolver().resolve(url: inputURL)
         currentURL = resolved.url
+        explicitlyAudioOnly = resolved.contentType?
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .hasPrefix("audio/") == true
+        isAudioOnly = explicitlyAudioOnly
 
         if resolved.contentType == "video/mp2t" || resolved.contentType == "rtmp" || resolved.contentType?.contains("dash+xml") == true || urlString.contains(".mpd") {
-            playWithVLC(url: resolved.url, contentType: resolved.contentType)
+            playWithKSPlayer(url: resolved.url, contentType: resolved.contentType)
             return
         }
 
@@ -91,6 +272,52 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         avPlayer.isMuted = isMuted
         avPlayer.play()
 
+        // A live HLS asset may initially report zero video tracks even when it
+        // contains video. Only positive video evidence is authoritative here;
+        // an audio MIME type is handled immediately above.
+        trackDetectionTask = Task { [weak self, weak item] in
+            guard let self, let item else { return }
+            do {
+                async let videoTracksResult = asset.loadTracks(withMediaType: .video)
+                async let audioTracksResult = asset.loadTracks(withMediaType: .audio)
+                let (videoTracks, audioTracks) = try await (videoTracksResult, audioTracksResult)
+                guard self.avPlayer.currentItem === item else { return }
+                if !videoTracks.isEmpty {
+                    self.isAudioOnly = false
+                }
+                if let audioTrack = audioTracks.first {
+                    self.audioPeakMonitor.attach(to: item, track: audioTrack)
+                } else {
+                    // HLS frequently exposes its selected audio track only on
+                    // AVPlayerItem after playback has started.
+                    for _ in 0..<20 {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard self.avPlayer.currentItem === item else { return }
+                        if let audioTrack = item.tracks
+                            .compactMap(\.assetTrack)
+                            .first(where: { $0.mediaType == .audio }) {
+                            self.audioPeakMonitor.attach(to: item, track: audioTrack)
+                            break
+                        }
+                    }
+                }
+                quadLog.log("[\(self.quadrant.displayName)] asset video tracks=\(videoTracks.count)")
+            } catch {
+                quadLog.warning("[\(self.quadrant.displayName)] unable to inspect tracks: \(error, privacy: .public)")
+            }
+        }
+
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .playbackStart,
+            streamName: name ?? inputURL.lastPathComponent,
+            streamUrl: urlString,
+            quadrant: quadrant.rawValue,
+            layoutMode: .quad,
+            decoderType: .hardware,
+            decoderName: "AVPlayer"
+        )
+
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: item,
@@ -108,6 +335,15 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 quadLog.error("[\(self.quadrant.displayName)] AVPlayer item failed")
+                TelemetryReporter.shared.report(
+                    deviceCode: DeviceIdentityStore.shared.deviceId,
+                    eventType: .playbackError,
+                    streamName: self.streamName,
+                    quadrant: self.quadrant.rawValue,
+                    layoutMode: .quad,
+                    decoderType: .hardware,
+                    errorCode: "AVPlayerItemFailedToPlayToEndTime"
+                )
                 self.performRecovery()
             }
         }
@@ -119,6 +355,8 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         quadLog.log("[\(self.quadrant.displayName)] stop")
         updateTask?.cancel()
         updateTask = nil
+        trackDetectionTask?.cancel()
+        trackDetectionTask = nil
 
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
@@ -128,18 +366,14 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(errorObserver)
             self.errorObserver = nil
         }
-        if let vlcStateObserver {
-            NotificationCenter.default.removeObserver(vlcStateObserver)
-            self.vlcStateObserver = nil
-        }
 
-        if isUsingVLC {
-            vlcPlayer.stop()
-            vlcPlayer.drawable = nil
+        if isUsingKSPlayer {
+            ksCoordinator?.resetPlayer()
+            ksCoordinator = nil
         }
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
-        isUsingVLC = false
+        isUsingKSPlayer = false
 
         if let m3u8 = currentM3U8File {
             try? FileManager.default.removeItem(at: m3u8)
@@ -149,14 +383,26 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         isActive = false
         isBuffering = false
         isFailed = false
+        isAudioOnly = false
+        explicitlyAudioOnly = false
+        audioPeakMonitor.reset()
         currentURL = nil
         originalURL = nil
+        logoURL = nil
+
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .playbackStop,
+            streamName: streamName,
+            quadrant: quadrant.rawValue,
+            layoutMode: .quad
+        )
     }
 
     func toggleMute() {
         isMuted.toggle()
-        if isUsingVLC {
-            vlcPlayer.audio?.volume = isMuted ? 0 : 100
+        if isUsingKSPlayer {
+            ksCoordinator?.isMuted = isMuted
         } else {
             avPlayer.isMuted = isMuted
         }
@@ -165,53 +411,86 @@ final class QuadrantPlayer: NSObject, ObservableObject {
 
     func setMuted(_ muted: Bool) {
         isMuted = muted
-        if isUsingVLC {
-            vlcPlayer.audio?.volume = isMuted ? 0 : 100
+        if isUsingKSPlayer {
+            ksCoordinator?.isMuted = isMuted
         } else {
             avPlayer.isMuted = isMuted
         }
     }
 
-    private func playWithVLC(url: URL, contentType: String?) {
-        isUsingVLC = true
-        vlcPlayer.stop()
+    func restart() {
+        guard let url = originalURL else { return }
+        let name = streamName
+        let logo = logoURL?.absoluteString
+        Task { await play(urlString: url.absoluteString, name: name, logoURLString: logo) }
+    }
 
-        guard let media = VLCMedia(url: url) else {
-            quadLog.error("[\(self.quadrant.displayName)] failed to create VLCMedia")
-            markFailed()
-            return
+    func adjustVolume(by percent: Int) {
+        let delta = Float(percent) / 100
+        if isUsingKSPlayer {
+            let current = ksCoordinator?.playbackVolume ?? 1
+            ksCoordinator?.playbackVolume = min(1, max(0, current + delta))
+        } else {
+            avPlayer.volume = min(1, max(0, avPlayer.volume + delta))
         }
-        media.addOption(":http-user-agent=VLC/3.0.21 LibVLC/3.0.21")
+    }
+
+    func samplePeak() -> Float {
+        audioPeakMonitor.samplePeak()
+    }
+
+    private func playWithKSPlayer(url: URL, contentType: String?) {
+        let coordinator = KSVideoPlayer.Coordinator()
+        ksCoordinator = coordinator
+        isUsingKSPlayer = true
+
+        let options = KSOptions()
+        options.userAgent = "VLC/3.0.21 LibVLC/3.0.21"
         if contentType?.contains("dash+xml") == true || url.absoluteString.contains(".mpd") {
-            media.addOption(":demux=dash")
+            quadLog.log("[\(self.quadrant.displayName)] DASH stream")
         }
-        vlcPlayer.media = media
-        vlcPlayer.audio?.volume = isMuted ? 0 : 100
 
-        vlcStateObserver = NotificationCenter.default.addObserver(
-            forName: VLCMediaPlayer.stateChangedNotification,
-            object: vlcPlayer,
-            queue: .main
-        ) { [weak self] _ in
+        coordinator.onStateChanged = { [weak self] _, state in
             Task { @MainActor [weak self] in
-                self?.handleVLCStateChange()
+                self?.handleKSStateChange(state: state)
+            }
+        }
+        coordinator.onFinish = { [weak self] _, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if error != nil {
+                    quadLog.error("[\(self.quadrant.displayName)] KSPlayer finished with error")
+                    self.performRecovery()
+                }
             }
         }
 
-        vlcPlayer.play()
+        coordinator.isMuted = isMuted
+        _ = coordinator.makeView(url: url, options: options)
         startUpdateLoop()
+
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .playbackStart,
+            streamName: streamName ?? url.lastPathComponent,
+            streamUrl: url.absoluteString,
+            quadrant: quadrant.rawValue,
+            layoutMode: .quad,
+            decoderType: .software,
+            decoderName: "KSPlayer/FFmpeg"
+        )
     }
 
-    private func handleVLCStateChange() {
-        let state = vlcPlayer.state
+    private func handleKSStateChange(state: KSPlayerState) {
         switch state {
         case .error:
-            quadLog.error("[\(self.quadrant.displayName)] VLC error state")
+            quadLog.error("[\(self.quadrant.displayName)] KSPlayer error state")
             performRecovery()
-        case .buffering, .opening:
+        case .buffering, .preparing:
             isBuffering = true
-        case .playing:
+        case .readyToPlay, .bufferFinished:
             isBuffering = false
+            updateKSPlayerMediaKind()
         case .paused:
             isBuffering = false
         default:
@@ -230,23 +509,62 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     }
 
     private func refreshState() {
-        if isUsingVLC {
-            let currentTime = (vlcPlayer.time.value?.doubleValue ?? 0) / 1000.0
-            if currentTime > 0 {
+        if isUsingKSPlayer {
+            let state = ksCoordinator?.state ?? .initialized
+            let currentTime = ksCoordinator?.playerLayer?.player.currentPlaybackTime ?? 0
+            let nowBuffering = !(state == .bufferFinished || currentTime > 0)
+            if lastTelemetryBuffering != nowBuffering {
+                lastTelemetryBuffering = nowBuffering
+                TelemetryReporter.shared.report(
+                    deviceCode: DeviceIdentityStore.shared.deviceId,
+                    eventType: nowBuffering ? .bufferingStart : .bufferingEnd,
+                    streamName: streamName,
+                    quadrant: quadrant.rawValue,
+                    layoutMode: .quad,
+                    decoderType: .software
+                )
+            }
+            if state == .bufferFinished || currentTime > 0 {
                 isBuffering = false
+                updateKSPlayerMediaKind()
             }
             return
         }
 
         let item = avPlayer.currentItem
-        let hasVideo = item?.presentationSize != .zero
+        if item?.presentationSize != .zero {
+            isAudioOnly = false
+        } else if explicitlyAudioOnly {
+            isAudioOnly = true
+        }
         let wasBuffering = isBuffering
         isBuffering = avPlayer.timeControlStatus != .playing
         if wasBuffering != isBuffering {
             quadLog.log("[\(self.quadrant.displayName)] buffering \(wasBuffering) -> \(self.isBuffering)")
         }
-        if !hasVideo && isActive {
-            // Audio-only stream in a quad cell is not expected; keep it running.
+        if lastTelemetryBuffering != isBuffering {
+            lastTelemetryBuffering = isBuffering
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: isBuffering ? .bufferingStart : .bufferingEnd,
+                streamName: streamName,
+                quadrant: quadrant.rawValue,
+                layoutMode: .quad,
+                decoderType: .hardware
+            )
+        }
+    }
+
+    private func updateKSPlayerMediaKind() {
+        guard let mediaPlayer = ksCoordinator?.playerLayer?.player else { return }
+        if let enginePlayer = (mediaPlayer as? KSMEPlayer)?.audioOutput as? AudioEnginePlayer {
+            audioPeakMonitor.attach(to: enginePlayer.engine)
+        }
+        let videoTracks = mediaPlayer.tracks(mediaType: .video)
+        let audioTracks = mediaPlayer.tracks(mediaType: .audio)
+        // Wait until the demuxer has exposed at least one track before deciding.
+        if !videoTracks.isEmpty || !audioTracks.isEmpty {
+            isAudioOnly = videoTracks.isEmpty
         }
     }
 
@@ -255,21 +573,34 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             markFailed()
             return
         }
-        recoveryAttempt += 1
-        if recoveryAttempt > 3 {
+        let nextAttempt = recoveryAttempt + 1
+        recoveryAttempt = nextAttempt
+        if nextAttempt > 3 {
             markFailed()
             return
         }
         quadLog.log("[\(self.quadrant.displayName)] recovery attempt \(self.recoveryAttempt)")
         Task {
             let name = streamName
-            await play(urlString: url.absoluteString, name: name)
+            let logo = logoURL?.absoluteString
+            await play(urlString: url.absoluteString, name: name, logoURLString: logo)
+            recoveryAttempt = nextAttempt
         }
     }
 
     private func markFailed() {
         isFailed = true
         isBuffering = false
+
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .playbackFailure,
+            streamName: streamName,
+            quadrant: quadrant.rawValue,
+            layoutMode: .quad,
+            decoderType: isUsingKSPlayer ? .software : .hardware,
+            errorReason: "max_recovery_attempts"
+        )
     }
 }
 
@@ -278,9 +609,13 @@ final class QuadrantPlayer: NSObject, ObservableObject {
 @MainActor
 final class QuadPlayerController: ObservableObject {
     @Published var focusedQuadrant: Quadrant = .topLeft
+    @Published var isFocusBorderVisible = true
     @Published var isActive = false
+    @Published var expandedQuadrant: Quadrant?
 
     private var players: [Quadrant: QuadrantPlayer] = [:]
+    private var unmutedByUser: Set<Quadrant> = []
+    private var hideFocusTask: Task<Void, Never>?
 
     func player(for quadrant: Quadrant) -> QuadrantPlayer {
         if let existing = players[quadrant] {
@@ -291,9 +626,10 @@ final class QuadPlayerController: ObservableObject {
         return newPlayer
     }
 
-    func play(urlString: String, name: String?, quadrant: Quadrant) async {
+    func play(urlString: String, name: String?, logoURLString: String? = nil, quadrant: Quadrant) async {
         isActive = true
-        await player(for: quadrant).play(urlString: urlString, name: name)
+        await player(for: quadrant).play(urlString: urlString, name: name, logoURLString: logoURLString)
+        applyVolumes()
     }
 
     func stop(quadrant: Quadrant) {
@@ -307,9 +643,14 @@ final class QuadPlayerController: ObservableObject {
         }
         isActive = false
         focusedQuadrant = .topLeft
+        isFocusBorderVisible = true
+        hideFocusTask?.cancel()
+        hideFocusTask = nil
+        expandedQuadrant = nil
+        unmutedByUser.removeAll()
     }
 
-    func moveFocus(direction: MoveDirection) {
+    func moveFocus(direction: MoveCommandDirection) {
         var row = focusedQuadrant.row
         var col = focusedQuadrant.column
 
@@ -322,15 +663,84 @@ final class QuadPlayerController: ObservableObject {
             col = max(0, col - 1)
         case .right:
             col = min(1, col + 1)
+        @unknown default:
+            return
         }
 
         if let next = Quadrant.allCases.first(where: { $0.row == row && $0.column == col }) {
             focusedQuadrant = next
+            applyVolumes()
+            revealFocusBorderTemporarily()
         }
     }
 
     func toggleMuteFocused() {
-        players[focusedQuadrant]?.toggleMute()
+        if unmutedByUser.contains(focusedQuadrant) {
+            unmutedByUser.remove(focusedQuadrant)
+        } else {
+            unmutedByUser.insert(focusedQuadrant)
+        }
+        applyVolumes()
+        revealFocusBorderTemporarily()
+    }
+
+    func focus(_ quadrant: Quadrant) {
+        focusedQuadrant = quadrant
+        applyVolumes()
+        revealFocusBorderTemporarily()
+    }
+
+    func showFocusedSingleView() {
+        guard expandedQuadrant == nil else { return }
+        expandedQuadrant = focusedQuadrant
+        applyVolumes()
+    }
+
+    @discardableResult
+    func restoreQuadView() -> Bool {
+        guard expandedQuadrant != nil else { return false }
+        expandedQuadrant = nil
+        applyVolumes()
+        revealFocusBorderTemporarily()
+        return true
+    }
+
+    func restartFocused() {
+        players[focusedQuadrant]?.restart()
+    }
+
+    func restart(quadrant: Quadrant) {
+        players[quadrant]?.restart()
+    }
+
+    func focusAudio(quadrant: Quadrant) {
+        guard players[quadrant]?.isActive == true else { return }
+        focusedQuadrant = quadrant
+        unmutedByUser.removeAll()
+        applyVolumes()
+        revealFocusBorderTemporarily()
+        quadLog.log("Audio focused on \(quadrant.displayName, privacy: .public)")
+    }
+
+    func adjustVolume(by percent: Int) {
+        players.values.filter(\.isActive).forEach { $0.adjustVolume(by: percent) }
+    }
+
+    private func applyVolumes() {
+        for (quadrant, player) in players {
+            let audible = quadrant == (expandedQuadrant ?? focusedQuadrant) || unmutedByUser.contains(quadrant)
+            player.setMuted(!audible)
+        }
+    }
+
+    private func revealFocusBorderTemporarily() {
+        isFocusBorderVisible = true
+        hideFocusTask?.cancel()
+        hideFocusTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.isFocusBorderVisible = false
+        }
     }
 
     func removeFocused(deviceId: String) {

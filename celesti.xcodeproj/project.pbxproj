@@ -6,28 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		7B28D026053919D315B91FA8 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = 031A30E4F9EB039BEEE81793 /* KSPlayer */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		71E425532F847C57003848A2 /* celesti.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = celesti.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		71E425632F84D2C5003848A2 /* XCRemoteSwiftPackageReference "vlckit-spm" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/virtualox/vlckit-spm";
-			requirement = {
-				kind = exactVersion;
-				version = 4.0.0-alpha.19;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		71E425642F84D2C6003848A2 /* VLCKitSPM */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 71E425632F84D2C5003848A2 /* XCRemoteSwiftPackageReference "vlckit-spm" */;
-			productName = VLCKitSPM;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		71E425552F847C57003848A2 /* celesti */ = {
@@ -42,6 +27,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7B28D026053919D315B91FA8 /* KSPlayer in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,6 +60,7 @@
 				71E4254F2F847C57003848A2 /* Sources */,
 				71E425502F847C57003848A2 /* Frameworks */,
 				71E425512F847C57003848A2 /* Resources */,
+				830AF2590978105138BD3A13 /* Fix Framework Bundle IDs */,
 			);
 			buildRules = (
 			);
@@ -84,7 +71,7 @@
 			);
 			name = celesti;
 			packageProductDependencies = (
-				71E425642F84D2C6003848A2 /* VLCKitSPM */,
+				031A30E4F9EB039BEEE81793 /* KSPlayer */,
 			);
 			productName = celesti;
 			productReference = 71E425532F847C57003848A2 /* celesti.app */;
@@ -113,10 +100,10 @@
 				Base,
 			);
 			mainGroup = 71E4254A2F847C57003848A2;
-			packageReferences = (
-				71E425632F84D2C5003848A2 /* XCRemoteSwiftPackageReference "vlckit-spm" */,
-			);
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A3859BE35604EA99218367C4 /* XCRemoteSwiftPackageReference "KSPlayer" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 71E425542F847C57003848A2 /* Products */;
 			projectDirPath = "";
@@ -136,6 +123,28 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		830AF2590978105138BD3A13 /* Fix Framework Bundle IDs */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Fix Framework Bundle IDs";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# FFmpegKit/KSPlayer embedded frameworks may contain underscores in their\n# CFBundleIdentifier, which is rejected by Xcode's validation step on tvOS.\n# Replace underscores with hyphens and re-sign so the modified Info.plists\n# remain valid when installed on a real device.\nFRAMEWORKS_DIR=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\nif [ -d \"${FRAMEWORKS_DIR}\" ]; then\n  find \"${FRAMEWORKS_DIR}\" -name \"Info.plist\" -path \"*.framework/*\" -print0 | while IFS= read -r -d '' plist; do\n    id=$(/usr/libexec/PlistBuddy -c \"Print :CFBundleIdentifier\" \"${plist}\" 2>/dev/null)\n    if [ -n \"${id}\" ]; then\n      fixed=$(echo \"${id}\" | tr '_' '-')\n      if [ \"${id}\" != \"${fixed}\" ]; then\n        /usr/libexec/PlistBuddy -c \"Set :CFBundleIdentifier ${fixed}\" \"${plist}\"\n      fi\n    fi\n  done\n  if [ -n \"${EXPANDED_CODE_SIGN_IDENTITY}\" ]; then\n    find \"${FRAMEWORKS_DIR}\" -maxdepth 1 -name \"*.framework\" -print0 | while IFS= read -r -d '' framework; do\n      # Do not preserve the old identifier; let codesign read the updated\n      # bundle identifier from the patched Info.plist.\n      codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \\\n               --preserve-metadata=entitlements,flags \\\n               --timestamp=none \"${framework}\"\n    done\n  fi\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		71E4254F2F847C57003848A2 /* Sources */ = {
@@ -278,6 +287,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = N32N2U54JS;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -308,6 +318,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = N32N2U54JS;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -351,6 +362,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A3859BE35604EA99218367C4 /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		031A30E4F9EB039BEEE81793 /* KSPlayer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A3859BE35604EA99218367C4 /* XCRemoteSwiftPackageReference "KSPlayer" */;
+			productName = KSPlayer;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 71E4254B2F847C57003848A2 /* Project object */;
 }

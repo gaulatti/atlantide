@@ -1,7 +1,7 @@
 import AVKit
 import Combine
+import KSPlayer
 import SwiftUI
-import VLCKitSPM
 
 struct ContentView: View {
     @EnvironmentObject private var appModel: CelestiAppModel
@@ -9,10 +9,11 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            CelestiAmbientBackground(includeGradient: appModel.playback == nil)
+            CelestiAmbientBackground(includeGradient: appModel.playback == nil && appModel.layoutMode == .single)
 
-            if appModel.isQuadActive {
+            if appModel.layoutMode == .quad {
                 QuadPlaybackView()
+                    .environmentObject(appModel)
             } else if let playback = appModel.playback {
                 PlaybackRootView(playback: playback)
             } else {
@@ -231,14 +232,17 @@ private struct PlaybackRootView: View {
                     appModel.retryPlayback()
                 }
             } else {
-                // Keep VLCPlayerView in hierarchy always so the drawable
-                // UIView persists across play/stop cycles.  Use opacity
+                // Keep KSVideoPlayer in hierarchy always so the underlying
+                // view persists across play/stop cycles. Use opacity
                 // to hide it when AVPlayer is active.
-                VLCPlayerView(player: appModel.playerController.vlcPlayer)
-                    .opacity(appModel.playerController.isUsingVLC ? 1 : 0)
-                    .ignoresSafeArea()
+                if let coordinator = appModel.playerController.ksCoordinator,
+                   let currentURL = appModel.playerController.currentURL {
+                    KSVideoPlayer(coordinator: coordinator, url: currentURL, options: KSOptions())
+                        .opacity(appModel.playerController.isUsingKSPlayer ? 1 : 0)
+                        .ignoresSafeArea()
+                }
 
-                if !appModel.playerController.isUsingVLC {
+                if !appModel.playerController.isUsingKSPlayer {
                     PlayerContainerView(player: appModel.playerController.player)
                         .ignoresSafeArea()
                 }
@@ -267,6 +271,28 @@ private struct PlaybackRootView: View {
             }
         }
         .ignoresSafeArea()
+        .focusable()
+        .onTapGesture {
+            appModel.handlePlaybackSelect()
+        }
+        .onLongPressGesture {
+            appModel.restartPlayback()
+        }
+        .onPlayPauseCommand {
+            appModel.togglePlayPause()
+        }
+        .onMoveCommand { direction in
+            switch direction {
+            case .left:
+                appModel.seekBackward()
+            case .right:
+                appModel.seekForward()
+            case .up, .down:
+                appModel.showDvrOverlay(action: .none)
+            default:
+                break
+            }
+        }
     }
 }
 
@@ -473,7 +499,6 @@ private struct AudioPlaybackView: View {
 private struct CallsignOverlayView: View {
     let callsign: CallsignPresentation
 
-    @Environment(\.colorScheme) private var colorScheme
     @State private var opacity: Double = 0
 
     private let fadeInDuration: Double = 0.5
@@ -481,77 +506,74 @@ private struct CallsignOverlayView: View {
     private let fadeOutDuration: Double = 4.0
 
     var body: some View {
-        ZStack {
-            // Top edge glow
-            LinearGradient(
-                colors: [Color.celestiPrimary(for: colorScheme).opacity(0.5 * opacity), .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 36)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .ignoresSafeArea()
+        GeometryReader { proxy in
+            let hasNickname = callsign.nickname?.isEmpty == false
+            let backdropHeight = max(hasNickname ? 330 : 260, proxy.size.height * 0.31)
 
-            // Left edge glow
-            LinearGradient(
-                colors: [Color.celestiPrimary(for: colorScheme).opacity(0.5 * opacity), .clear],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 36)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .ignoresSafeArea()
+            ZStack(alignment: .bottom) {
+                // A real perimeter signal: crisp at the edge, soft toward the image.
+                Rectangle()
+                    .strokeBorder(Color.celestiSunset.opacity(0.9), lineWidth: 5)
+                    .shadow(color: Color.celestiSunset.opacity(0.75), radius: 18)
+                    .shadow(color: Color.celestiSunset.opacity(0.35), radius: 42)
+                    .padding(3)
 
-            // Right edge glow
-            LinearGradient(
-                colors: [.clear, Color.celestiPrimary(for: colorScheme).opacity(0.5 * opacity)],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 36)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-            .ignoresSafeArea()
+                // The scrim and content share one fixed-height region, so even a
+                // two-line nickname can never escape into unprotected video.
+                ZStack(alignment: .bottom) {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: Color.black.opacity(0.82), location: 0.3),
+                            .init(color: Color.black.opacity(0.97), location: 0.62),
+                            .init(color: Color.black.opacity(0.98), location: 1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
 
-            // Bottom dark backdrop — covers bottom 30% of screen
-            GeometryReader { proxy in
-                LinearGradient(
-                    colors: [.clear, Color.black.opacity(0.95 * opacity)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: proxy.size.height * 0.3)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            }
-            .ignoresSafeArea()
+                    RadialGradient(
+                        colors: [Color.celestiSunset.opacity(0.2), .clear],
+                        center: .bottom,
+                        startRadius: 0,
+                        endRadius: proxy.size.width * 0.45
+                    )
 
-            // Bottom edge glow (on top of dark backdrop)
-            LinearGradient(
-                colors: [.clear, Color.celestiPrimary(for: colorScheme).opacity(0.5 * opacity)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 36)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .ignoresSafeArea()
+                    VStack(spacing: 15) {
+                        if let nickname = callsign.nickname, !nickname.isEmpty {
+                            Text(nickname)
+                                .font(CelestiTypography.brand(size: 48, weight: .bold))
+                                .foregroundStyle(.white)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.6)
+                                .shadow(color: .black, radius: 8, y: 3)
+                        }
 
-            // Text at bottom center
-            VStack(spacing: 6) {
-                if let nickname = callsign.nickname, !nickname.isEmpty {
-                    Text(nickname)
-                        .font(CelestiTypography.brand(size: 36, weight: .bold))
-                        .foregroundStyle(Color.primary.opacity(opacity))
-                        .multilineTextAlignment(.center)
+                        Text(callsign.deviceCode.uppercased())
+                            .font(CelestiTypography.body(size: 25, weight: .semibold))
+                            .tracking(4)
+                            .foregroundStyle(.white.opacity(0.92))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 10)
+                            .background(Color.black.opacity(0.45), in: Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                            )
+                    }
+                    .frame(maxWidth: 1500)
+                    .padding(.horizontal, 120)
+                    .padding(.bottom, 58)
                 }
-
-                Text(callsign.deviceCode.uppercased())
-                    .font(CelestiTypography.body(size: 27, weight: .medium))
-                    .tracking(1.5)
-                    .foregroundStyle(Color.primary.opacity(opacity * 0.76))
-                    .multilineTextAlignment(.center)
+                .frame(height: backdropHeight)
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(.bottom, 72)
+            .ignoresSafeArea()
         }
+        .opacity(opacity)
+        .allowsHitTesting(false)
         .onAppear {
             withAnimation(.easeOut(duration: fadeInDuration)) {
                 opacity = 1

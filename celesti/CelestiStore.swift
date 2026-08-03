@@ -2,11 +2,11 @@ import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
+import KSPlayer
 import OSLog
 import SwiftUI
 import UIKit
 import Combine
-import VLCKitSPM
 
 private let log = Logger(subsystem: "com.gaulatti.celesti", category: "CelestiStore")
 private let resolverLog = Logger(subsystem: "com.gaulatti.celesti", category: "StreamResolver")
@@ -17,10 +17,15 @@ struct CelestiCommand: Decodable {
     let url: String?
     let title: String?
     let name: String?
+    let logo: String?
+    let delta: Int?
     let deviceCode: String?
     let nickname: String?
-    let layoutMode: String?
     let quadrant: Int?
+    let layoutMode: String?
+    let channelId: String?
+    // Kept for compatibility with the short-lived Atlantide command shape.
+    let mode: String?
 }
 
 struct CallsignPresentation: Equatable {
@@ -70,17 +75,17 @@ final class CelestiAppModel: ObservableObject {
     @Published var nickname: String?
     @Published var playback: PlaybackPresentation?
     @Published var callsign: CallsignPresentation?
-    @Published var isQuadActive: Bool = false
 
     let deviceId: String
     let playerController: PlayerController
     let quadPlayerController: QuadPlayerController
 
+    @Published var layoutMode: LayoutMode = .single
+
     private let registrationService = RegistrationService()
     private let commandStream = CommandStreamClient()
     private var registrationTask: Task<Void, Never>?
     private var started = false
-    private var cancellables = Set<AnyCancellable>()
 
     init() {
         self.deviceId = DeviceIdentityStore.shared.deviceId
@@ -99,12 +104,6 @@ final class CelestiAppModel: ObservableObject {
                 self.dvrAction = .none
             }
         }
-        self.quadPlayerController.$isActive
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] active in
-                self?.isQuadActive = active
-            }
-            .store(in: &cancellables)
     }
 
     func startIfNeeded() {
@@ -123,7 +122,6 @@ final class CelestiAppModel: ObservableObject {
         commandStream.disconnect()
         nickname = nil
         registrationState = .demo
-        quadPlayerController.stopAll()
 
         Task {
             log.log("showDemoMode: starting demo playback")
@@ -134,7 +132,6 @@ final class CelestiAppModel: ObservableObject {
     func exitDemoMode() {
         log.log("exitDemoMode entered")
         playerController.stop()
-        quadPlayerController.stopAll()
         registrationState = .pending
         startRegistrationPolling()
     }
@@ -150,12 +147,21 @@ final class CelestiAppModel: ObservableObject {
         dvrAction = .none
         playerController.stop()
         quadPlayerController.stopAll()
+        layoutMode = .single
     }
 
     func togglePlayPause() {
         playerController.togglePlayPause()
         let isPaused = playerController.isPaused
         showDvrOverlay(action: isPaused ? .pause : .play)
+    }
+
+    func handlePlaybackSelect() {
+        if dvrVisible {
+            togglePlayPause()
+        } else {
+            showDvrOverlay(action: .none)
+        }
     }
 
     func seekBackward() {
@@ -185,9 +191,7 @@ final class CelestiAppModel: ObservableObject {
     }
 
     func handleExitCommand() {
-        if isQuadActive {
-            dismissPlayback()
-        } else if playback != nil {
+        if playback != nil {
             dismissPlayback()
         } else if registrationState == .demo {
             exitDemoMode()
@@ -196,6 +200,22 @@ final class CelestiAppModel: ObservableObject {
 
     func retryPlayback() {
         playerController.retryFromFailure()
+    }
+
+    func restartPlayback() {
+        if layoutMode == .quad {
+            quadPlayerController.restartFocused()
+        } else {
+            playerController.restart()
+        }
+    }
+
+    func adjustVolume(by percent: Int) {
+        if layoutMode == .quad {
+            quadPlayerController.adjustVolume(by: percent)
+        } else {
+            playerController.adjustVolume(by: percent)
+        }
     }
 
     private func startRegistrationPolling() {
@@ -236,8 +256,7 @@ final class CelestiAppModel: ObservableObject {
     }
 
     private func handle(command: CelestiCommand) async {
-        log.log("Received command: type=\(command.type, privacy: .public) videoId=\(command.videoId ?? "nil", privacy: .public) url=\(command.url ?? "nil", privacy: .public) name=\(command.name ?? command.title ?? "nil", privacy: .public) layoutMode=\(command.layoutMode ?? "nil", privacy: .public) quadrant=\(command.quadrant.map(String.init) ?? "nil", privacy: .public)")
-        let mode = LayoutMode.from(command.layoutMode)
+        log.log("Received command: type=\(command.type, privacy: .public) videoId=\(command.videoId ?? "nil", privacy: .public) url=\(command.url ?? "nil", privacy: .public) name=\(command.name ?? command.title ?? "nil", privacy: .public)")
         switch command.type {
         case "youtube":
             guard let videoId = command.videoId, !videoId.isEmpty else {
@@ -245,32 +264,92 @@ final class CelestiAppModel: ObservableObject {
                 return
             }
             log.log("Opening YouTube videoId: \(videoId, privacy: .public)")
-            quadPlayerController.stopAll()
             playerController.openYouTube(videoId: videoId)
-        case "m3u":
+        case "m3u", "dash":
             guard let url = command.url, !url.isEmpty else {
-                log.error("m3u command missing url")
+                log.error("\(command.type, privacy: .public) command missing url")
                 return
             }
-            let streamName = command.name ?? command.title
-            log.log("Playing m3u stream: url=\(url, privacy: .public) name=\(streamName ?? "unknown", privacy: .public) mode=\(mode.rawValue)")
-            if mode == .quad, let quadrant = Quadrant.from(command.quadrant) {
+            TelemetryReporter.shared.setActiveChannel(command.channelId)
+            let requestedLayout = LayoutMode.from(command.layoutMode)
+            if requestedLayout == .quad {
+                guard let quadrant = Quadrant.from(command.quadrant) else {
+                    log.error("quad playback command missing valid quadrant")
+                    return
+                }
+                layoutMode = .quad
                 playerController.stop()
-                await quadPlayerController.play(urlString: url, name: streamName, quadrant: quadrant)
+                await quadPlayerController.play(
+                    urlString: url,
+                    name: command.name ?? command.title,
+                    logoURLString: command.logo,
+                    quadrant: quadrant
+                )
             } else {
+                layoutMode = .single
                 quadPlayerController.stopAll()
-                await playerController.playStream(urlString: url, radioName: streamName)
+                await playerController.playStream(urlString: url, radioName: command.name ?? command.title)
             }
         case "stop":
-            log.log("Stop command received mode=\(mode.rawValue)")
-            if let quadrant = Quadrant.from(command.quadrant) {
+            if let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad {
+                log.log("Stop command received for quadrant \(quadrant.rawValue)")
                 quadPlayerController.stop(quadrant: quadrant)
-            } else if mode == .quad {
-                quadPlayerController.stopAll()
             } else {
+                log.log("Stop command received")
                 playerController.stop()
                 quadPlayerController.stopAll()
+                layoutMode = .single
             }
+        case "seize":
+            log.log("Seize command received")
+            dismissPlayback()
+        case "restart_stream":
+            if let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad {
+                quadPlayerController.restart(quadrant: quadrant)
+            } else {
+                restartPlayback()
+            }
+        case "focus_audio":
+            guard let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad else {
+                log.warning("focus_audio command missing a valid active quadrant")
+                return
+            }
+            quadPlayerController.focusAudio(quadrant: quadrant)
+        case "volume":
+            adjustVolume(by: command.delta ?? 0)
+        case "reboot":
+            // tvOS does not expose an API that lets a third-party app reboot the device.
+            log.warning("Reboot command ignored: unavailable to tvOS applications")
+        case "layout":
+            let newMode = LayoutMode.from(command.mode)
+            log.log("Layout command received: \(newMode.rawValue, privacy: .public)")
+            layoutMode = newMode
+            if newMode == .quad {
+                playerController.stop()
+            } else {
+                quadPlayerController.stopAll()
+            }
+        case "quad":
+            guard let url = command.url, !url.isEmpty, let quadrant = Quadrant.from(command.quadrant) else {
+                log.error("quad command missing url or valid quadrant")
+                return
+            }
+            log.log("Quad play command: quadrant=\(quadrant.rawValue) url=\(url, privacy: .public)")
+            layoutMode = .quad
+            playerController.stop()
+            await quadPlayerController.play(
+                urlString: url,
+                name: command.name ?? command.title,
+                logoURLString: command.logo,
+                quadrant: quadrant
+            )
+        case "quad_stop":
+            guard let quadrant = Quadrant.from(command.quadrant) else {
+                log.error("quad_stop command missing valid quadrant")
+                return
+            }
+            log.log("Quad stop command: quadrant=\(quadrant.rawValue)")
+            quadPlayerController.stop(quadrant: quadrant)
         case "callsign":
             log.log("Callsign received: code=\(command.deviceCode ?? "nil", privacy: .public) nickname=\(command.nickname ?? "nil", privacy: .public)")
             callsign = CallsignPresentation(
@@ -451,8 +530,8 @@ private final class CommandStreamClient {
 
 final class PlayerController: NSObject, ObservableObject {
     let player = AVPlayer()
-    @Published var vlcPlayer = VLCMediaPlayer()
-    @Published var isUsingVLC = false
+    @Published var ksCoordinator: KSVideoPlayer.Coordinator?
+    @Published var isUsingKSPlayer = false
     var onPresentationChanged: ((PlaybackPresentation?) -> Void)?
     var onDvrStateChanged: ((DvrAction?) -> Void)?
 
@@ -468,10 +547,9 @@ final class PlayerController: NSObject, ObservableObject {
     private var errorObserver: NSObjectProtocol?
     private var currentSource: PlaybackSource?
     private var currentRadioName: String?
-    private var currentURL: URL?
+    var currentURL: URL?
     private var originalURL: URL?
     private var currentM3U8File: URL?
-    private var vlcStateObserver: NSObjectProtocol?
 
     // Quality management (0=AUTO, 1=HD, 2=SD, 3=MED, 4=LOW, 5=MIN)
     private var qualityTier: Int = 3 {
@@ -497,14 +575,17 @@ final class PlayerController: NSObject, ObservableObject {
     private var lastKnownTime: Double = 0
     private var lastKnownBuffering: Bool = false
 
+    // Telemetry buffering tracking
+    private var lastTelemetryBuffering: Bool = false
+
     private let watchdogInterval: TimeInterval = 3.0
     private let bufferingStallLimit: TimeInterval = 12.0
     private let positionStallLimit: TimeInterval = 8.0
     private let stableWindowForUpgrade: TimeInterval = 300.0
 
     var isPaused: Bool {
-        if isUsingVLC {
-            return vlcPlayer.state == .paused || vlcPlayer.state == .stopped
+        if isUsingKSPlayer {
+            return ksCoordinator?.state == .paused
         }
         return player.rate == 0 && player.timeControlStatus != .waitingToPlayAtSpecifiedRate
     }
@@ -534,6 +615,8 @@ final class PlayerController: NSObject, ObservableObject {
 
     func stop() {
         playerLog.log("stop called")
+        let stoppedStreamName = currentRadioName
+        let hadPlayback = currentSource != nil || player.currentItem != nil || isUsingKSPlayer
         stopWatchdog()
         removeTimeObserver()
         updateTask?.cancel()
@@ -552,21 +635,13 @@ final class PlayerController: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(errorObserver)
             self.errorObserver = nil
         }
-        if let vlcStateObserver {
-            NotificationCenter.default.removeObserver(vlcStateObserver)
-            self.vlcStateObserver = nil
-        }
-
-        if isUsingVLC {
-            vlcPlayer.stop()
-            vlcPlayer.drawable = nil
-            // Don't nil the media — VLCKit retains it internally
-            // and nil-setting causes libvlc_media_retain assertion
-            // on the next play.
+        if isUsingKSPlayer {
+            ksCoordinator?.resetPlayer()
+            ksCoordinator = nil
         }
         player.pause()
         player.replaceCurrentItem(with: nil)
-        isUsingVLC = false
+        isUsingKSPlayer = false
         currentSource = nil
         currentRadioName = nil
         currentURL = nil
@@ -584,6 +659,15 @@ final class PlayerController: NSObject, ObservableObject {
         failedStreamName = nil
         audioFallbackApplied = false
         currentPresentation = nil
+
+        if hadPlayback {
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: .playbackStop,
+                streamName: stoppedStreamName,
+                layoutMode: .single
+            )
+        }
 
         UIApplication.shared.isIdleTimerDisabled = false
     }
@@ -607,11 +691,11 @@ final class PlayerController: NSObject, ObservableObject {
             playerLog.log("togglePlayPause: ignored, playback failed")
             return
         }
-        if isUsingVLC {
-            if vlcPlayer.isPlaying {
-                vlcPlayer.pause()
+        if isUsingKSPlayer {
+            if ksCoordinator?.state.isPlaying == true {
+                ksCoordinator?.playerLayer?.pause()
             } else {
-                vlcPlayer.play()
+                ksCoordinator?.playerLayer?.play()
             }
             return
         }
@@ -624,13 +708,30 @@ final class PlayerController: NSObject, ObservableObject {
         }
     }
 
+    func restart() {
+        guard let url = originalURL else { return }
+        let name = currentRadioName
+        let source = currentSource ?? .remoteCommand
+        Task { await play(urlString: url.absoluteString, radioName: name, source: source) }
+    }
+
+    func adjustVolume(by percent: Int) {
+        let delta = Float(percent) / 100
+        if isUsingKSPlayer {
+            let current = ksCoordinator?.playbackVolume ?? 1
+            ksCoordinator?.playbackVolume = min(1, max(0, current + delta))
+        } else {
+            player.volume = min(1, max(0, player.volume + delta))
+        }
+    }
+
     func seek(by seconds: Double) {
         guard !isPlaybackFailed else {
             playerLog.log("seek: ignored, playback failed")
             return
         }
-        if isUsingVLC {
-            playerLog.log("seek: VLC seek not supported for live streams")
+        if isUsingKSPlayer {
+            playerLog.log("seek: KSPlayer seek not supported for live streams")
             return
         }
         guard let item = player.currentItem, item.duration.seconds.isFinite else {
@@ -697,8 +798,8 @@ final class PlayerController: NSObject, ObservableObject {
         if resolved.contentType == "video/mp2t" || resolved.contentType == "rtmp" || resolved.contentType?.contains("dash+xml") == true || urlString.contains(".mpd") {
             let format = resolved.contentType == "video/mp2t" ? "MPEG-TS"
                        : resolved.contentType == "rtmp" ? "RTMP" : "DASH"
-            playerLog.log("play: \(format) detected, using VLC player")
-            playWithVLC(url: resolved.url, radioName: radioName, contentType: resolved.contentType)
+            playerLog.log("play: \(format) detected, using KSPlayer")
+            playWithKSPlayer(url: resolved.url, radioName: radioName, contentType: resolved.contentType)
             return
         }
 
@@ -768,6 +869,16 @@ final class PlayerController: NSObject, ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             playerLog.error("play: AVPlayerItemFailedToPlayToEndTime notification received")
+
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: .playbackError,
+                streamName: self.currentRadioName,
+                layoutMode: .single,
+                decoderType: .hardware,
+                errorCode: "AVPlayerItemFailedToPlayToEndTime"
+            )
+
             performEmergencyRecovery(reason: "playback_error")
         }
 
@@ -782,42 +893,69 @@ final class PlayerController: NSObject, ObservableObject {
 
         playerLog.log("play: playback setup complete")
 
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .playbackStart,
+            streamName: radioName ?? currentURL?.lastPathComponent,
+            streamUrl: urlString,
+            layoutMode: .single,
+            decoderType: .hardware,
+            decoderName: "AVPlayer"
+        )
+
         DispatchQueue.main.async {
             UIApplication.shared.isIdleTimerDisabled = true
         }
     }
 
-    private func playWithVLC(url: URL, radioName: String?, contentType: String? = nil) {
-        isUsingVLC = true
-        vlcPlayer.stop()
+    private func playWithKSPlayer(url: URL, radioName: String?, contentType: String? = nil) {
+        let coordinator = KSVideoPlayer.Coordinator()
+        ksCoordinator = coordinator
+        isUsingKSPlayer = true
 
-        guard let media = VLCMedia(url: url) else {
-            playerLog.error("playWithVLC: failed to create VLCMedia")
-            failPlayback()
-            return
-        }
-        media.addOption(":http-user-agent=VLC/3.0.21 LibVLC/3.0.21")
+        let options = KSOptions()
+        options.userAgent = "VLC/3.0.21 LibVLC/3.0.21"
         if contentType?.contains("dash+xml") == true || url.absoluteString.contains(".mpd") {
-            media.addOption(":demux=dash")
-            playerLog.log("playWithVLC: added DASH demux option")
-        }
-        vlcPlayer.media = media
-
-        vlcStateObserver = NotificationCenter.default.addObserver(
-            forName: VLCMediaPlayer.stateChangedNotification,
-            object: vlcPlayer,
-            queue: .main
-        ) { [weak self] _ in
-            self?.handleVLCStateChange()
+            playerLog.log("playWithKSPlayer: DASH stream")
         }
 
-        playerLog.log("playWithVLC: starting VLC playback")
+        coordinator.onStateChanged = { [weak self] _, state in
+            self?.handleKSStateChange(state: state)
+        }
+        coordinator.onPlay = { [weak self] currentTime, totalTime in
+            guard let self else { return }
+            guard var presentation = self.currentPresentation else { return }
+            presentation.currentTime = currentTime
+            presentation.duration = totalTime
+            self.currentPresentation = presentation
+        }
+        coordinator.onFinish = { [weak self] _, error in
+            guard let self else { return }
+            if let error {
+                playerLog.error("KSPlayer finished with error: \(error, privacy: .public)")
+                self.performEmergencyRecovery(reason: "ksplayer_error")
+            }
+        }
+
+        playerLog.log("playWithKSPlayer: starting KSPlayer playback")
         playbackStartedAt = Date()
-        vlcPlayer.play()
+
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .playbackStart,
+            streamName: currentRadioName ?? url.lastPathComponent,
+            streamUrl: url.absoluteString,
+            layoutMode: .single,
+            decoderType: .software,
+            decoderName: "KSPlayer/FFmpeg"
+        )
+
+        // Trigger player creation; the view will own the coordinator.
+        _ = coordinator.makeView(url: url, options: options)
 
         updateTask = Task { [weak self] in
             guard let self else { return }
-            playerLog.log("playWithVLC: starting presentation update task")
+            playerLog.log("playWithKSPlayer: starting presentation update task")
             while !Task.isCancelled {
                 self.refreshPresentationState()
                 try? await Task.sleep(nanoseconds: 750_000_000)
@@ -827,18 +965,17 @@ final class PlayerController: NSObject, ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
-    private func handleVLCStateChange() {
+    private func handleKSStateChange(state: KSPlayerState) {
         guard var presentation = currentPresentation else { return }
-        let state = vlcPlayer.state
-        playerLog.log("VLC state: \(state.rawValue)")
+        playerLog.log("KSPlayer state: \(state.description)")
 
         switch state {
         case .error:
-            playerLog.error("VLC error state, triggering recovery")
-            performEmergencyRecovery(reason: "vlc_error")
-        case .buffering, .opening:
+            playerLog.error("KSPlayer error state, triggering recovery")
+            performEmergencyRecovery(reason: "ksplayer_error")
+        case .buffering, .preparing:
             presentation.isBuffering = true
-        case .playing:
+        case .readyToPlay, .bufferFinished:
             presentation.isBuffering = false
         case .paused:
             presentation.isBuffering = false
@@ -862,19 +999,26 @@ final class PlayerController: NSObject, ObservableObject {
             return
         }
 
-        if isUsingVLC {
-            let currentTime = (vlcPlayer.time.value?.doubleValue ?? 0) / 1000.0
-            // Once time has advanced, VLC is rendering — clear buffering
-            // even if the internal state still says .buffering (common
-            // for live MPEG-TS streams).
-            if currentTime > 0 {
+        if isUsingKSPlayer {
+            let state = ksCoordinator?.state ?? .initialized
+            let currentTime = ksCoordinator?.playerLayer?.player.currentPlaybackTime ?? 0
+            let nowBuffering = !(state == .bufferFinished || currentTime > 0)
+            if lastTelemetryBuffering != nowBuffering {
+                lastTelemetryBuffering = nowBuffering
+                TelemetryReporter.shared.report(
+                    deviceCode: DeviceIdentityStore.shared.deviceId,
+                    eventType: nowBuffering ? .bufferingStart : .bufferingEnd,
+                    streamName: currentRadioName,
+                    layoutMode: .single,
+                    decoderType: .software
+                )
+            }
+            if state == .bufferFinished || currentTime > 0 {
                 presentation.isBuffering = false
             }
-            presentation.isPaused = vlcPlayer.state == .paused
+            presentation.isPaused = state == .paused
             presentation.currentTime = currentTime
-            if let dur = vlcPlayer.media?.length.value?.doubleValue {
-                presentation.duration = dur / 1000.0
-            }
+            presentation.duration = ksCoordinator?.playerLayer?.player.duration ?? 0
             updatePresentationDvr(&presentation)
             currentPresentation = presentation
             return
@@ -885,12 +1029,20 @@ final class PlayerController: NSObject, ObservableObject {
         let hasVideo = presentationSize != .zero
 
         presentation.isAudioOnly = !hasVideo && currentSource != .demo
-        let wasBufferingPreviously = presentation.isBuffering
+        let wasBufferingPreviously = lastTelemetryBuffering
         presentation.isBuffering = player.timeControlStatus != .playing
         presentation.isPaused = isPaused
         presentation.qualityTier = qualityTier
 
         if wasBufferingPreviously != presentation.isBuffering {
+            lastTelemetryBuffering = presentation.isBuffering
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: presentation.isBuffering ? .bufferingStart : .bufferingEnd,
+                streamName: currentRadioName,
+                layoutMode: .single,
+                decoderType: isUsingKSPlayer ? .software : .hardware
+            )
             if let t0 = playbackStartedAt {
                 let elapsed = Date().timeIntervalSince(t0)
                 playerLog.log("refreshPresentationState: buffering changed \(wasBufferingPreviously) -> \(presentation.isBuffering) after \(elapsed, privacy: .public)s, timeControlStatus=\(self.player.timeControlStatus.rawValue)")
@@ -913,7 +1065,7 @@ final class PlayerController: NSObject, ObservableObject {
         updatePresentationDvr(&presentation)
         currentPresentation = presentation
 
-        if !isUsingVLC, !audioFallbackApplied {
+        if !isUsingKSPlayer, !audioFallbackApplied {
             checkAudioTracks()
         }
     }
@@ -1091,21 +1243,18 @@ final class PlayerController: NSObject, ObservableObject {
             playerLog.log("performRetry: re-resolving and replaying original URL \(url.absoluteString, privacy: .public)")
             let name = currentRadioName
             let source = currentSource ?? .remoteCommand
+            let attempt = recoveryAttempt
             let task = Task {
                 await play(urlString: url.absoluteString, radioName: name, source: source)
+                // play() performs a full cleanup, so retain the recovery budget
+                // across the final re-resolution attempt.
+                recoveryAttempt = attempt
             }
             recoveryTask = task
-        } else if isUsingVLC, let url = currentURL {
-            playerLog.log("performRetry: restarting VLC with \(url.absoluteString, privacy: .public)")
-            vlcPlayer.stop()
-            guard let media = VLCMedia(url: url) else {
-                playerLog.error("performRetry: failed to create VLCMedia")
-                failPlayback()
-                return
-            }
-            media.addOption(":http-user-agent=VLC/3.0.21 LibVLC/3.0.21")
-            vlcPlayer.media = media
-            vlcPlayer.play()
+        } else if isUsingKSPlayer, let url = currentURL {
+            playerLog.log("performRetry: restarting KSPlayer with \(url.absoluteString, privacy: .public)")
+            ksCoordinator?.resetPlayer()
+            playWithKSPlayer(url: url, radioName: currentRadioName, contentType: nil)
         } else if let url = currentURL {
             playerLog.log("performRetry: replacing item with current URL \(url.absoluteString, privacy: .public)")
             var headers: [String: String] = [:]
@@ -1130,12 +1279,31 @@ final class PlayerController: NSObject, ObservableObject {
         guard let item = player.currentItem else { return }
         let cap = bitrateCaps[qualityTier]
         item.preferredPeakBitRate = cap
+
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .bitrateChanged,
+            streamName: currentRadioName,
+            layoutMode: .single,
+            decoderType: isUsingKSPlayer ? .software : .hardware,
+            bitrate: cap
+        )
     }
 
     private func failPlayback() {
         isPlaybackFailed = true
         failedStreamName = currentRadioName ?? currentURL?.lastPathComponent ?? "Unknown"
         playerLog.error("failPlayback: streamName=\(self.failedStreamName ?? "nil", privacy: .public)")
+
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .playbackFailure,
+            streamName: failedStreamName,
+            layoutMode: .single,
+            decoderType: isUsingKSPlayer ? .software : .hardware,
+            errorReason: "max_recovery_attempts"
+        )
+
         player.pause()
         recoveryAttempt = 0
         UIApplication.shared.isIdleTimerDisabled = false
@@ -1293,22 +1461,21 @@ final class StreamResolver {
                                url.absoluteString.contains(".m3u")
 
             // For raw MPEG-TS, return the original URL — PlayerController
-            // routes these to VLCKit (which handles TS natively like
-            // ExoPlayer's TsExtractor).
+            // routes these to KSPlayer (FFmpeg-based, handles TS natively).
             if contentType == "video/mp2t" {
-                resolverLog.log("resolve: content-type=video/mp2t, VLC will handle natively")
+                resolverLog.log("resolve: content-type=video/mp2t, KSPlayer will handle natively")
                 return ResolvedStream(url: url, headers: [:], contentType: contentType, playlist: nil)
             }
 
-            // DASH manifest — route to VLCKit for native DASH demux
+            // DASH manifest — route to KSPlayer for FFmpeg DASH demux
             if contentType.contains("dash+xml") || url.absoluteString.contains(".mpd") {
-                resolverLog.log("resolve: DASH manifest detected, VLC will handle")
+                resolverLog.log("resolve: DASH manifest detected, KSPlayer will handle")
                 return ResolvedStream(url: url, headers: [:], contentType: contentType, playlist: nil)
             }
 
-            // RTMP stream — VLCKit handles natively
+            // RTMP stream — KSPlayer handles via FFmpeg
             if let scheme = url.scheme?.lowercased(), scheme == "rtmp" || scheme == "rtmps" {
-                resolverLog.log("resolve: RTMP stream detected, VLC will handle")
+                resolverLog.log("resolve: RTMP stream detected, KSPlayer will handle")
                 return ResolvedStream(url: url, headers: [:], contentType: "rtmp", playlist: nil)
             }
 
@@ -1374,20 +1541,6 @@ final class StreamResolver {
         try? playlist.write(to: fileURL, atomically: true, encoding: .utf8)
         m3u8Log.log("createTempM3U8: wrote \(fileURL.path)")
         return fileURL
-    }
-}
-
-struct VLCPlayerView: UIViewRepresentable {
-    let player: VLCMediaPlayer
-
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        player.drawable = view
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        player.drawable = uiView
     }
 }
 
