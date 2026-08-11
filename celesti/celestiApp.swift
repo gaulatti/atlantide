@@ -10,6 +10,8 @@ struct celestiApp: App {
         let fonts = [
             "encode_sans_regular",
             "encode_sans_semibold",
+            "encode_sans_bold",
+            "ibm_plex_mono_bold",
             "libre_franklin_medium",
             "libre_franklin_regular",
         ]

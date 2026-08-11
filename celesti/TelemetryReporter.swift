@@ -27,6 +27,7 @@ enum TelemetryDecoderType: String, Encodable {
 enum TelemetryLayoutMode: String, Encodable {
     case single
     case quad
+    case emergency
 }
 
 struct TelemetryEvent: Encodable {

@@ -182,6 +182,7 @@ private final class AudioPeakMonitor: @unchecked Sendable {
 @MainActor
 final class QuadrantPlayer: NSObject, ObservableObject {
     let quadrant: Quadrant
+    let telemetryLayoutMode: TelemetryLayoutMode
 
     let avPlayer = AVPlayer()
     @Published var ksCoordinator: KSVideoPlayer.Coordinator?
@@ -194,6 +195,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     @Published var isAudioOnly = false
     @Published var streamName: String?
     @Published var logoURL: URL?
+    var onPlaybackFailure: ((String?) -> Void)?
 
     private var originalURL: URL?
     var currentURL: URL?
@@ -209,8 +211,9 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     private var recoveryAttempt = 0
     private var lastTelemetryBuffering = false
 
-    init(quadrant: Quadrant) {
+    init(quadrant: Quadrant, layoutMode: TelemetryLayoutMode = .quad) {
         self.quadrant = quadrant
+        self.telemetryLayoutMode = layoutMode
         super.init()
         avPlayer.isMuted = false
     }
@@ -313,7 +316,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             streamName: name ?? inputURL.lastPathComponent,
             streamUrl: urlString,
             quadrant: quadrant.rawValue,
-            layoutMode: .quad,
+            layoutMode: telemetryLayoutMode,
             decoderType: .hardware,
             decoderName: "AVPlayer"
         )
@@ -340,7 +343,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                     eventType: .playbackError,
                     streamName: self.streamName,
                     quadrant: self.quadrant.rawValue,
-                    layoutMode: .quad,
+                    layoutMode: self.telemetryLayoutMode,
                     decoderType: .hardware,
                     errorCode: "AVPlayerItemFailedToPlayToEndTime"
                 )
@@ -395,7 +398,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             eventType: .playbackStop,
             streamName: streamName,
             quadrant: quadrant.rawValue,
-            layoutMode: .quad
+            layoutMode: telemetryLayoutMode
         )
     }
 
@@ -475,7 +478,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             streamName: streamName ?? url.lastPathComponent,
             streamUrl: url.absoluteString,
             quadrant: quadrant.rawValue,
-            layoutMode: .quad,
+            layoutMode: telemetryLayoutMode,
             decoderType: .software,
             decoderName: "KSPlayer/FFmpeg"
         )
@@ -520,7 +523,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                     eventType: nowBuffering ? .bufferingStart : .bufferingEnd,
                     streamName: streamName,
                     quadrant: quadrant.rawValue,
-                    layoutMode: .quad,
+                    layoutMode: telemetryLayoutMode,
                     decoderType: .software
                 )
             }
@@ -549,7 +552,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 eventType: isBuffering ? .bufferingStart : .bufferingEnd,
                 streamName: streamName,
                 quadrant: quadrant.rawValue,
-                layoutMode: .quad,
+                layoutMode: telemetryLayoutMode,
                 decoderType: .hardware
             )
         }
@@ -597,10 +600,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             eventType: .playbackFailure,
             streamName: streamName,
             quadrant: quadrant.rawValue,
-            layoutMode: .quad,
+            layoutMode: telemetryLayoutMode,
             decoderType: isUsingKSPlayer ? .software : .hardware,
             errorReason: "max_recovery_attempts"
         )
+        onPlaybackFailure?("max_recovery_attempts")
     }
 }
 

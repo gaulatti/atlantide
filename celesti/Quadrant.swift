@@ -29,10 +29,12 @@ enum Quadrant: Int, CaseIterable, Identifiable {
 enum LayoutMode: String {
     case single
     case quad
+    case emergency
 
     static func from(_ value: String?) -> LayoutMode {
         guard let value = value?.lowercased() else { return .single }
         if value == "quad" || value == "quadrant" { return .quad }
+        if value == "emergency" { return .emergency }
         return .single
     }
 }

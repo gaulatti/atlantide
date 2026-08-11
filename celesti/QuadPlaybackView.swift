@@ -58,10 +58,11 @@ struct QuadPlaybackView: View {
     }
 }
 
-private struct QuadrantCell: View {
+struct QuadrantCell: View {
     let quadrant: Quadrant
     @ObservedObject var player: QuadrantPlayer
     let isSelected: Bool
+    var selectionColor = Color(red: 229 / 255, green: 57 / 255, blue: 53 / 255)
 
     var body: some View {
         ZStack {
@@ -111,14 +112,14 @@ private struct QuadrantCell: View {
         .overlay {
             if isSelected {
                 Rectangle()
-                    .strokeBorder(Color(red: 229 / 255, green: 57 / 255, blue: 53 / 255), lineWidth: 6)
+                    .strokeBorder(selectionColor, lineWidth: 6)
                     .allowsHitTesting(false)
             }
         }
     }
 }
 
-private struct QuadTestPatternView: View {
+struct QuadTestPatternView: View {
     let title: String
     let logoURL: URL?
     let isAudioOnly: Bool
@@ -279,7 +280,7 @@ private struct QuadTestPatternView: View {
     }
 }
 
-private struct AVVideoPlayerView: UIViewRepresentable {
+struct AVVideoPlayerView: UIViewRepresentable {
     let player: AVPlayer
 
     func makeUIView(context: Context) -> AVPlayerSurfaceView {
@@ -294,7 +295,7 @@ private struct AVVideoPlayerView: UIViewRepresentable {
     }
 }
 
-private final class AVPlayerSurfaceView: UIView {
+final class AVPlayerSurfaceView: UIView {
     override class var layerClass: AnyClass {
         AVPlayerLayer.self
     }

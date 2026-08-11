@@ -79,6 +79,7 @@ final class CelestiAppModel: ObservableObject {
     let deviceId: String
     let playerController: PlayerController
     let quadPlayerController: QuadPlayerController
+    let emergencyPlayerController: EmergencyPlayerController
 
     @Published var layoutMode: LayoutMode = .single
 
@@ -92,6 +93,7 @@ final class CelestiAppModel: ObservableObject {
         log.log("AppModel init, deviceId: \(self.deviceId, privacy: .public)")
         self.playerController = PlayerController()
         self.quadPlayerController = QuadPlayerController()
+        self.emergencyPlayerController = EmergencyPlayerController()
         self.playerController.onPresentationChanged = { [weak self] presentation in
             self?.playback = presentation
         }
@@ -147,6 +149,7 @@ final class CelestiAppModel: ObservableObject {
         dvrAction = .none
         playerController.stop()
         quadPlayerController.stopAll()
+        emergencyPlayerController.stopAll()
         layoutMode = .single
     }
 
@@ -203,7 +206,9 @@ final class CelestiAppModel: ObservableObject {
     }
 
     func restartPlayback() {
-        if layoutMode == .quad {
+        if layoutMode == .emergency {
+            emergencyPlayerController.restartFocused()
+        } else if layoutMode == .quad {
             quadPlayerController.restartFocused()
         } else {
             playerController.restart()
@@ -211,7 +216,9 @@ final class CelestiAppModel: ObservableObject {
     }
 
     func adjustVolume(by percent: Int) {
-        if layoutMode == .quad {
+        if layoutMode == .emergency {
+            emergencyPlayerController.adjustVolume(by: percent)
+        } else if layoutMode == .quad {
             quadPlayerController.adjustVolume(by: percent)
         } else {
             playerController.adjustVolume(by: percent)
@@ -272,13 +279,29 @@ final class CelestiAppModel: ObservableObject {
             }
             TelemetryReporter.shared.setActiveChannel(command.channelId)
             let requestedLayout = LayoutMode.from(command.layoutMode)
-            if requestedLayout == .quad {
+            if requestedLayout == .emergency {
+                guard let position = command.quadrant, (0..<8).contains(position) else {
+                    log.error("emergency playback command missing valid pool position")
+                    return
+                }
+                layoutMode = .emergency
+                playerController.stop()
+                quadPlayerController.stopAll()
+                await emergencyPlayerController.play(
+                    slot: position,
+                    channelId: command.channelId,
+                    urlString: url,
+                    name: command.name ?? command.title,
+                    logoURLString: command.logo
+                )
+            } else if requestedLayout == .quad {
                 guard let quadrant = Quadrant.from(command.quadrant) else {
                     log.error("quad playback command missing valid quadrant")
                     return
                 }
                 layoutMode = .quad
                 playerController.stop()
+                emergencyPlayerController.stopAll()
                 await quadPlayerController.play(
                     urlString: url,
                     name: command.name ?? command.title,
@@ -288,33 +311,48 @@ final class CelestiAppModel: ObservableObject {
             } else {
                 layoutMode = .single
                 quadPlayerController.stopAll()
+                emergencyPlayerController.stopAll()
                 await playerController.playStream(urlString: url, radioName: command.name ?? command.title)
             }
         case "stop":
-            if let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad {
+            if let position = command.quadrant,
+               (0..<8).contains(position),
+               layoutMode == .emergency {
+                log.log("Stop command received for emergency pool position \(position)")
+                await emergencyPlayerController.stop(slot: position)
+            } else if let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad {
                 log.log("Stop command received for quadrant \(quadrant.rawValue)")
                 quadPlayerController.stop(quadrant: quadrant)
             } else {
                 log.log("Stop command received")
                 playerController.stop()
                 quadPlayerController.stopAll()
+                emergencyPlayerController.stopAll()
                 layoutMode = .single
             }
         case "seize":
             log.log("Seize command received")
             dismissPlayback()
         case "restart_stream":
-            if let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad {
+            if let position = command.quadrant,
+               (0..<8).contains(position),
+               layoutMode == .emergency {
+                emergencyPlayerController.restart(slot: position)
+            } else if let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad {
                 quadPlayerController.restart(quadrant: quadrant)
             } else {
                 restartPlayback()
             }
         case "focus_audio":
-            guard let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad else {
-                log.warning("focus_audio command missing a valid active quadrant")
-                return
+            if let position = command.quadrant,
+               (0..<8).contains(position),
+               layoutMode == .emergency {
+                emergencyPlayerController.focusAudio(slot: position)
+            } else if let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad {
+                quadPlayerController.focusAudio(quadrant: quadrant)
+            } else {
+                log.warning("focus_audio command missing a valid active stream")
             }
-            quadPlayerController.focusAudio(quadrant: quadrant)
         case "volume":
             adjustVolume(by: command.delta ?? 0)
         case "reboot":
@@ -326,8 +364,13 @@ final class CelestiAppModel: ObservableObject {
             layoutMode = newMode
             if newMode == .quad {
                 playerController.stop()
+                emergencyPlayerController.stopAll()
+            } else if newMode == .emergency {
+                playerController.stop()
+                quadPlayerController.stopAll()
             } else {
                 quadPlayerController.stopAll()
+                emergencyPlayerController.stopAll()
             }
         case "quad":
             guard let url = command.url, !url.isEmpty, let quadrant = Quadrant.from(command.quadrant) else {
@@ -337,6 +380,7 @@ final class CelestiAppModel: ObservableObject {
             log.log("Quad play command: quadrant=\(quadrant.rawValue) url=\(url, privacy: .public)")
             layoutMode = .quad
             playerController.stop()
+            emergencyPlayerController.stopAll()
             await quadPlayerController.play(
                 urlString: url,
                 name: command.name ?? command.title,
