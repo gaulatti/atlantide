@@ -306,6 +306,7 @@ final class CelestiAppModel: ObservableObject {
                     urlString: url,
                     name: command.name ?? command.title,
                     logoURLString: command.logo,
+                    channelId: command.channelId,
                     quadrant: quadrant
                 )
             } else {
@@ -385,6 +386,7 @@ final class CelestiAppModel: ObservableObject {
                 urlString: url,
                 name: command.name ?? command.title,
                 logoURLString: command.logo,
+                channelId: command.channelId,
                 quadrant: quadrant
             )
         case "quad_stop":
@@ -614,6 +616,12 @@ final class PlayerController: NSObject, ObservableObject {
     private var recoveryWorkItem: DispatchWorkItem?
     private var recoveryTask: Task<Void, Never>?
     private var playbackStartedAt: Date?
+    private let bufferProfile = PlaybackBufferPolicy.profile(for: .single)
+    private var lastHealthSnapshotAt: Date = .distantPast
+    private var lastHealthTelemetryAt: Date = .distantPast
+    private var lastAccessLogRequestCount = 0
+    private var offlineProbeCount = 0
+    private var offlineProbeTask: Task<Void, Never>?
 
     // DVR auto-show tracking
     private var lastKnownTime: Double = 0
@@ -621,10 +629,12 @@ final class PlayerController: NSObject, ObservableObject {
 
     // Telemetry buffering tracking
     private var lastTelemetryBuffering: Bool = false
+    private var bufferingTelemetryCandidateAt: Date?
+    private var bufferingTelemetryReported = false
+    private var stablePlaybackStartedAt: Date?
 
     private let watchdogInterval: TimeInterval = 3.0
     private let bufferingStallLimit: TimeInterval = 12.0
-    private let positionStallLimit: TimeInterval = 8.0
     private let stableWindowForUpgrade: TimeInterval = 300.0
 
     var isPaused: Bool {
@@ -670,6 +680,8 @@ final class PlayerController: NSObject, ObservableObject {
         recoveryWorkItem = nil
         recoveryTask?.cancel()
         recoveryTask = nil
+        offlineProbeTask?.cancel()
+        offlineProbeTask = nil
 
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
@@ -699,6 +711,13 @@ final class PlayerController: NSObject, ObservableObject {
         lastPositionUpdateAt = .distantPast
         recoveryAttempt = 0
         hasEverReachedReady = false
+        lastHealthSnapshotAt = .distantPast
+        lastHealthTelemetryAt = .distantPast
+        lastAccessLogRequestCount = 0
+        offlineProbeCount = 0
+        bufferingTelemetryCandidateAt = nil
+        bufferingTelemetryReported = false
+        stablePlaybackStartedAt = nil
         isPlaybackFailed = false
         failedStreamName = nil
         audioFallbackApplied = false
@@ -868,6 +887,10 @@ final class PlayerController: NSObject, ObservableObject {
         let asset = AVURLAsset(url: resolved.url, options: assetOptions)
         playerLog.log("play: created AVURLAsset: \(asset, privacy: .public)")
         let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = bufferProfile.preferredForwardDuration
+        playerLog.info(
+            "event=buffer_profile viewport=single layout=single physicalMemoryMB=\(self.bufferProfile.physicalMemoryMB) lowMemory=\(self.bufferProfile.lowMemory) preferredSeconds=\(self.bufferProfile.preferredForwardDuration) maximumSeconds=\(self.bufferProfile.maximumDuration)"
+        )
 
         let metadataOutput = AVPlayerItemMetadataOutput(identifiers: nil)
         metadataOutput.setDelegate(MetadataCollector { [weak self] title in
@@ -959,6 +982,8 @@ final class PlayerController: NSObject, ObservableObject {
 
         let options = KSOptions()
         options.userAgent = "VLC/3.0.21 LibVLC/3.0.21"
+        options.preferredForwardBufferDuration = bufferProfile.preferredForwardDuration
+        options.maxBufferDuration = bufferProfile.maximumDuration
         if contentType?.contains("dash+xml") == true || url.absoluteString.contains(".mpd") {
             playerLog.log("playWithKSPlayer: DASH stream")
         }
@@ -1049,14 +1074,8 @@ final class PlayerController: NSObject, ObservableObject {
             let nowBuffering = !(state == .bufferFinished || currentTime > 0)
             if lastTelemetryBuffering != nowBuffering {
                 lastTelemetryBuffering = nowBuffering
-                TelemetryReporter.shared.report(
-                    deviceCode: DeviceIdentityStore.shared.deviceId,
-                    eventType: nowBuffering ? .bufferingStart : .bufferingEnd,
-                    streamName: currentRadioName,
-                    layoutMode: .single,
-                    decoderType: .software
-                )
             }
+            reportBufferingIfNeeded(nowBuffering, decoderType: .software)
             if state == .bufferFinished || currentTime > 0 {
                 presentation.isBuffering = false
             }
@@ -1065,6 +1084,8 @@ final class PlayerController: NSObject, ObservableObject {
             presentation.duration = ksCoordinator?.playerLayer?.player.duration ?? 0
             updatePresentationDvr(&presentation)
             currentPresentation = presentation
+            logKSPlaybackHealth(position: currentTime, state: state)
+            resetOfflineProbeAfterStablePlayback(isPlaying: state == .bufferFinished)
             return
         }
 
@@ -1080,13 +1101,6 @@ final class PlayerController: NSObject, ObservableObject {
 
         if wasBufferingPreviously != presentation.isBuffering {
             lastTelemetryBuffering = presentation.isBuffering
-            TelemetryReporter.shared.report(
-                deviceCode: DeviceIdentityStore.shared.deviceId,
-                eventType: presentation.isBuffering ? .bufferingStart : .bufferingEnd,
-                streamName: currentRadioName,
-                layoutMode: .single,
-                decoderType: isUsingKSPlayer ? .software : .hardware
-            )
             if let t0 = playbackStartedAt {
                 let elapsed = Date().timeIntervalSince(t0)
                 playerLog.log("refreshPresentationState: buffering changed \(wasBufferingPreviously) -> \(presentation.isBuffering) after \(elapsed, privacy: .public)s, timeControlStatus=\(self.player.timeControlStatus.rawValue)")
@@ -1094,6 +1108,8 @@ final class PlayerController: NSObject, ObservableObject {
                 playerLog.log("refreshPresentationState: buffering changed \(wasBufferingPreviously) -> \(presentation.isBuffering), timeControlStatus=\(self.player.timeControlStatus.rawValue)")
             }
         }
+        reportBufferingIfNeeded(presentation.isBuffering, decoderType: .hardware)
+        resetOfflineProbeAfterStablePlayback(isPlaying: player.timeControlStatus == .playing)
 
         if let currentItem = item {
             let current = currentItem.currentTime()
@@ -1112,6 +1128,88 @@ final class PlayerController: NSObject, ObservableObject {
         if !isUsingKSPlayer, !audioFallbackApplied {
             checkAudioTracks()
         }
+    }
+
+    private func reportBufferingIfNeeded(
+        _ buffering: Bool,
+        decoderType: TelemetryDecoderType
+    ) {
+        if buffering {
+            if bufferingTelemetryCandidateAt == nil { bufferingTelemetryCandidateAt = Date() }
+            guard !bufferingTelemetryReported,
+                  let candidate = bufferingTelemetryCandidateAt,
+                  Date().timeIntervalSince(candidate) >= 1 else { return }
+            bufferingTelemetryReported = true
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: .bufferingStart,
+                streamName: currentRadioName,
+                streamUrl: currentURL?.absoluteString,
+                layoutMode: .single,
+                decoderType: decoderType
+            )
+            return
+        }
+
+        bufferingTelemetryCandidateAt = nil
+        guard bufferingTelemetryReported else { return }
+        bufferingTelemetryReported = false
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .bufferingEnd,
+            streamName: currentRadioName,
+            streamUrl: currentURL?.absoluteString,
+            layoutMode: .single,
+            decoderType: decoderType
+        )
+    }
+
+    private func logKSPlaybackHealth(position: TimeInterval, state: KSPlayerState) {
+        let now = Date()
+        guard now.timeIntervalSince(lastHealthSnapshotAt) >= 5 else { return }
+        lastHealthSnapshotAt = now
+        let stateName = String(describing: state)
+        let healthStream = currentRadioName ?? "unknown"
+        playerLog.info(
+            "event=health stream=\(healthStream, privacy: .public) viewport=single layout=single state=\(stateName, privacy: .public) positionMs=\(Int(position * 1_000))"
+        )
+        if PlaybackRecoveryPolicy.shouldEmitRoutineHealth(
+            lastEmittedAt: lastHealthTelemetryAt,
+            now: now
+        ) {
+            lastHealthTelemetryAt = now
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: .playbackHealth,
+                streamName: currentRadioName,
+                streamUrl: currentURL?.absoluteString,
+                layoutMode: .single,
+                decoderType: .software,
+                metadata: [
+                    "state": stateName,
+                    "positionMs": String(Int(position * 1_000)),
+                    "physicalMemoryMB": bufferProfile.physicalMemoryMB.description,
+                    "preferredBufferMs": String(Int(bufferProfile.preferredForwardDuration * 1_000)),
+                ]
+            )
+        }
+    }
+
+    private func resetOfflineProbeAfterStablePlayback(isPlaying: Bool) {
+        guard isPlaying else {
+            stablePlaybackStartedAt = nil
+            return
+        }
+        if stablePlaybackStartedAt == nil { stablePlaybackStartedAt = Date() }
+        guard offlineProbeCount > 0,
+              PlaybackRecoveryPolicy.shouldResetCircuit(
+                  claimsToBePlaying: isPlaying,
+                  stablePlaybackStartedAt: stablePlaybackStartedAt,
+                  now: Date()
+              ) else { return }
+        offlineProbeCount = 0
+        recoveryAttempt = 0
+        playerLog.info("event=recovery_circuit_reset viewport=single layout=single")
     }
 
     private func checkAudioTracks() {
@@ -1192,6 +1290,7 @@ final class PlayerController: NSObject, ObservableObject {
             }
             return
         }
+        logPlaybackHealth(item: item)
 
         let isWaiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
         let isBufferEmpty = item.isPlaybackBufferEmpty
@@ -1216,7 +1315,7 @@ final class PlayerController: NSObject, ObservableObject {
             let currentPos = player.currentTime()
             if currentPos == lastPlaybackPosition {
                 let freezeDuration = Date().timeIntervalSince(lastPositionUpdateAt)
-                if freezeDuration > positionStallLimit {
+                if freezeDuration >= PlaybackRecoveryPolicy.freezeTimeout {
                     playerLog.error("checkPlaybackHealth: frozen playback for \(freezeDuration)s, recovering")
                     performEmergencyRecovery(reason: "frozen_playback")
                 }
@@ -1231,6 +1330,71 @@ final class PlayerController: NSObject, ObservableObject {
                     hasEverReachedReady = true
                 }
             }
+        }
+    }
+
+    private func logPlaybackHealth(item: AVPlayerItem) {
+        let now = Date()
+        guard now.timeIntervalSince(lastHealthSnapshotAt) >= 5 else { return }
+        lastHealthSnapshotAt = now
+
+        let position = player.currentTime().seconds.isFinite ? player.currentTime().seconds : 0
+        let bufferedEnd = item.loadedTimeRanges
+            .map(\.timeRangeValue)
+            .map { CMTimeRangeGetEnd($0).seconds }
+            .filter(\.isFinite)
+            .max() ?? position
+        let bufferedDuration = max(0, bufferedEnd - position)
+        var metadata: [String: String] = [
+            "state": player.timeControlStatus == .playing ? "ready" : "buffering",
+            "positionMs": String(Int(position * 1_000)),
+            "bufferedDurationMs": String(Int(bufferedDuration * 1_000)),
+            "physicalMemoryMB": bufferProfile.physicalMemoryMB.description,
+            "preferredBufferMs": String(Int(bufferProfile.preferredForwardDuration * 1_000)),
+        ]
+
+        if let event = item.accessLog()?.events.last {
+            metadata["observedBitrate"] = String(Int(event.observedBitrate))
+            metadata["indicatedBitrate"] = String(Int(event.indicatedBitrate))
+            metadata["stalls"] = event.numberOfStalls.description
+            if event.numberOfMediaRequests != lastAccessLogRequestCount {
+                lastAccessLogRequestCount = event.numberOfMediaRequests
+                TelemetryReporter.shared.report(
+                    deviceCode: DeviceIdentityStore.shared.deviceId,
+                    eventType: .streamLoad,
+                    streamName: currentRadioName,
+                    streamUrl: currentURL?.absoluteString,
+                    layoutMode: .single,
+                    decoderType: .hardware,
+                    bitrate: event.observedBitrate,
+                    durationMs: Int(event.transferDuration * 1_000),
+                    metadata: [
+                        "result": "success",
+                        "mediaRequests": event.numberOfMediaRequests.description,
+                        "bytesTransferred": event.numberOfBytesTransferred.description,
+                    ]
+                )
+            }
+        }
+
+        let healthStream = currentRadioName ?? currentURL?.absoluteString ?? "unknown"
+        playerLog.info(
+            "event=health stream=\(healthStream, privacy: .public) viewport=single layout=single positionMs=\(Int(position * 1_000)) bufferedDurationMs=\(Int(bufferedDuration * 1_000))"
+        )
+        if PlaybackRecoveryPolicy.shouldEmitRoutineHealth(
+            lastEmittedAt: lastHealthTelemetryAt,
+            now: now
+        ) {
+            lastHealthTelemetryAt = now
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: .playbackHealth,
+                streamName: currentRadioName,
+                streamUrl: currentURL?.absoluteString,
+                layoutMode: .single,
+                decoderType: .hardware,
+                metadata: metadata
+            )
         }
     }
 
@@ -1335,22 +1499,38 @@ final class PlayerController: NSObject, ObservableObject {
     }
 
     private func failPlayback() {
+        guard offlineProbeTask == nil, let retryURL = originalURL else { return }
         isPlaybackFailed = true
         failedStreamName = currentRadioName ?? currentURL?.lastPathComponent ?? "Unknown"
-        playerLog.error("failPlayback: streamName=\(self.failedStreamName ?? "nil", privacy: .public)")
+        offlineProbeCount += 1
+        let delay = PlaybackRecoveryPolicy.probeDelay(forAttempt: offlineProbeCount)
+        let failedDecoderType: TelemetryDecoderType = isUsingKSPlayer ? .software : .hardware
+        let offlineStream = failedStreamName ?? "unknown"
+        playerLog.error(
+            "event=source_offline stream=\(offlineStream, privacy: .public) viewport=single layout=single probe=\(self.offlineProbeCount) nextProbeSeconds=\(delay)"
+        )
 
         TelemetryReporter.shared.report(
             deviceCode: DeviceIdentityStore.shared.deviceId,
             eventType: .playbackFailure,
             streamName: failedStreamName,
             layoutMode: .single,
-            decoderType: isUsingKSPlayer ? .software : .hardware,
-            errorReason: "max_recovery_attempts"
+            decoderType: failedDecoderType,
+            errorReason: "source_offline",
+            metadata: [
+                "probe": offlineProbeCount.description,
+                "nextProbeMs": String(Int(delay * 1_000)),
+            ]
         )
 
+        stopWatchdog()
+        ksCoordinator?.resetPlayer()
+        ksCoordinator = nil
         player.pause()
+        player.replaceCurrentItem(with: nil)
+        isUsingKSPlayer = false
         recoveryAttempt = 0
-        UIApplication.shared.isIdleTimerDisabled = false
+        UIApplication.shared.isIdleTimerDisabled = true
         currentPresentation = PlaybackPresentation(
             source: currentSource ?? .remoteCommand,
             radioName: currentRadioName,
@@ -1360,6 +1540,21 @@ final class PlayerController: NSObject, ObservableObject {
             isPlaybackFailed: true,
             failedStreamName: failedStreamName
         )
+
+        let retryName = currentRadioName
+        let retrySource = currentSource ?? .remoteCommand
+        let probe = offlineProbeCount
+        offlineProbeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.offlineProbeTask = nil
+            await self.play(
+                urlString: retryURL.absoluteString,
+                radioName: retryName,
+                source: retrySource
+            )
+            self.offlineProbeCount = probe
+        }
     }
 
     private func maybeUpgradeQuality() {

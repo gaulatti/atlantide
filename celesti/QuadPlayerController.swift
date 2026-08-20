@@ -8,6 +8,7 @@ import SwiftUI
 import UIKit
 
 private let quadLog = Logger(subsystem: "com.gaulatti.celesti", category: "QuadPlayer")
+private let playbackHealthLog = Logger(subsystem: "com.gaulatti.celesti", category: "PlaybackHealth")
 
 private final class AudioPeakMonitor: @unchecked Sendable {
     private let lock = NSLock()
@@ -195,7 +196,9 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     @Published var isAudioOnly = false
     @Published var streamName: String?
     @Published var logoURL: URL?
+    @Published var failureStatus = "RETRYING"
     var onPlaybackFailure: ((String?) -> Void)?
+    var onStableRecovery: (() -> Void)?
 
     private var originalURL: URL?
     var currentURL: URL?
@@ -206,29 +209,59 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     private var errorObserver: NSObjectProtocol?
     private var endObserver: NSObjectProtocol?
     private let audioPeakMonitor = AudioPeakMonitor()
+    private let bufferProfile: PlaybackBufferProfile
 
     private let maxBitrate: Double = 800_000
+    private var currentChannelId: String?
     private var recoveryAttempt = 0
-    private var lastTelemetryBuffering = false
+    private var bufferingTelemetryReported = false
+    private var bufferingCandidateAt: Date?
+    private var offlineProbeTask: Task<Void, Never>?
+    private var offlineProbeCount = 0
+    private var recentRecoveryTimes: [Date] = []
+    private var lastPlaybackErrorAt: Date?
+    private var lastHealthSnapshotAt: Date = .distantPast
+    private var lastHealthTelemetryAt: Date = .distantPast
+    private var lastObservedPosition: TimeInterval = -1
+    private var lastPositionAdvancedAt: Date = .distantPast
+    private var lastStallRecoveryAt: Date = .distantPast
+    private var lastAccessLogRequestCount = 0
 
     init(quadrant: Quadrant, layoutMode: TelemetryLayoutMode = .quad) {
         self.quadrant = quadrant
         self.telemetryLayoutMode = layoutMode
+        self.bufferProfile = PlaybackBufferPolicy.profile(for: layoutMode)
         super.init()
         avPlayer.isMuted = false
     }
 
-    func play(urlString: String, name: String?, logoURLString: String? = nil) async {
+    func play(
+        urlString: String,
+        name: String?,
+        logoURLString: String? = nil,
+        channelId: String? = nil,
+        preserveRecoveryState: Bool = false
+    ) async {
         guard let inputURL = URL(string: urlString) else {
             quadLog.error("[\(self.quadrant.displayName)] invalid URL: \(urlString, privacy: .public)")
-            markFailed()
+            isFailed = true
+            isBuffering = false
+            failureStatus = "INVALID FEED"
+            onPlaybackFailure?("invalid_url")
             return
         }
 
         quadLog.log("[\(self.quadrant.displayName)] play: \(urlString, privacy: .public) name=\(name ?? "nil", privacy: .public)")
+        let retainedProbeCount = offlineProbeCount
+        let retainedRecoveryTimes = recentRecoveryTimes
         stop()
+        if preserveRecoveryState {
+            offlineProbeCount = retainedProbeCount
+            recentRecoveryTimes = retainedRecoveryTimes
+        }
         recoveryAttempt = 0
         originalURL = inputURL
+        currentChannelId = channelId
         streamName = name ?? inputURL.lastPathComponent
         logoURL = logoURLString.flatMap(URL.init(string:))
         isActive = true
@@ -269,6 +302,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let item = AVPlayerItem(asset: asset)
         item.preferredPeakBitRate = maxBitrate
         item.preferredMaximumResolution = CGSize(width: 854, height: 480)
+        item.preferredForwardBufferDuration = bufferProfile.preferredForwardDuration
+
+        playbackHealthLog.info(
+            "event=buffer_profile stream=\(self.streamIdentity, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public) physicalMemoryMB=\(self.bufferProfile.physicalMemoryMB) lowMemory=\(self.bufferProfile.lowMemory) preferredSeconds=\(self.bufferProfile.preferredForwardDuration) maximumSeconds=\(self.bufferProfile.maximumDuration)"
+        )
 
         avPlayer.replaceCurrentItem(with: item)
         avPlayer.automaticallyWaitsToMinimizeStalling = true
@@ -313,6 +351,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         TelemetryReporter.shared.report(
             deviceCode: DeviceIdentityStore.shared.deviceId,
             eventType: .playbackStart,
+            channelId: currentChannelId,
             streamName: name ?? inputURL.lastPathComponent,
             streamUrl: urlString,
             quadrant: quadrant.rawValue,
@@ -341,6 +380,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 TelemetryReporter.shared.report(
                     deviceCode: DeviceIdentityStore.shared.deviceId,
                     eventType: .playbackError,
+                    channelId: self.currentChannelId,
                     streamName: self.streamName,
                     quadrant: self.quadrant.rawValue,
                     layoutMode: self.telemetryLayoutMode,
@@ -356,8 +396,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
 
     func stop() {
         quadLog.log("[\(self.quadrant.displayName)] stop")
+        let stoppedChannelId = currentChannelId
         updateTask?.cancel()
         updateTask = nil
+        offlineProbeTask?.cancel()
+        offlineProbeTask = nil
         trackDetectionTask?.cancel()
         trackDetectionTask = nil
 
@@ -388,14 +431,27 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         isFailed = false
         isAudioOnly = false
         explicitlyAudioOnly = false
+        bufferingCandidateAt = nil
+        bufferingTelemetryReported = false
+        offlineProbeCount = 0
+        recentRecoveryTimes.removeAll()
+        lastPlaybackErrorAt = nil
+        lastHealthTelemetryAt = .distantPast
+        lastHealthSnapshotAt = .distantPast
+        lastObservedPosition = -1
+        lastPositionAdvancedAt = .distantPast
+        lastStallRecoveryAt = .distantPast
+        lastAccessLogRequestCount = 0
         audioPeakMonitor.reset()
         currentURL = nil
         originalURL = nil
+        currentChannelId = nil
         logoURL = nil
 
         TelemetryReporter.shared.report(
             deviceCode: DeviceIdentityStore.shared.deviceId,
             eventType: .playbackStop,
+            channelId: stoppedChannelId,
             streamName: streamName,
             quadrant: quadrant.rawValue,
             layoutMode: telemetryLayoutMode
@@ -425,7 +481,15 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         guard let url = originalURL else { return }
         let name = streamName
         let logo = logoURL?.absoluteString
-        Task { await play(urlString: url.absoluteString, name: name, logoURLString: logo) }
+        let channelId = currentChannelId
+        Task {
+            await play(
+                urlString: url.absoluteString,
+                name: name,
+                logoURLString: logo,
+                channelId: channelId
+            )
+        }
     }
 
     func adjustVolume(by percent: Int) {
@@ -449,6 +513,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
 
         let options = KSOptions()
         options.userAgent = "VLC/3.0.21 LibVLC/3.0.21"
+        options.preferredForwardBufferDuration = bufferProfile.preferredForwardDuration
+        options.maxBufferDuration = bufferProfile.maximumDuration
+        playbackHealthLog.info(
+            "event=buffer_profile stream=\(self.streamIdentity, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public) physicalMemoryMB=\(self.bufferProfile.physicalMemoryMB) lowMemory=\(self.bufferProfile.lowMemory) preferredSeconds=\(self.bufferProfile.preferredForwardDuration) maximumSeconds=\(self.bufferProfile.maximumDuration) engine=KSPlayer"
+        )
         if contentType?.contains("dash+xml") == true || url.absoluteString.contains(".mpd") {
             quadLog.log("[\(self.quadrant.displayName)] DASH stream")
         }
@@ -475,6 +544,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         TelemetryReporter.shared.report(
             deviceCode: DeviceIdentityStore.shared.deviceId,
             eventType: .playbackStart,
+            channelId: currentChannelId,
             streamName: streamName ?? url.lastPathComponent,
             streamUrl: url.absoluteString,
             quadrant: quadrant.rawValue,
@@ -516,21 +586,14 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             let state = ksCoordinator?.state ?? .initialized
             let currentTime = ksCoordinator?.playerLayer?.player.currentPlaybackTime ?? 0
             let nowBuffering = !(state == .bufferFinished || currentTime > 0)
-            if lastTelemetryBuffering != nowBuffering {
-                lastTelemetryBuffering = nowBuffering
-                TelemetryReporter.shared.report(
-                    deviceCode: DeviceIdentityStore.shared.deviceId,
-                    eventType: nowBuffering ? .bufferingStart : .bufferingEnd,
-                    streamName: streamName,
-                    quadrant: quadrant.rawValue,
-                    layoutMode: telemetryLayoutMode,
-                    decoderType: .software
-                )
-            }
+            updateBufferingTelemetry(nowBuffering, decoderType: .software)
             if state == .bufferFinished || currentTime > 0 {
                 isBuffering = false
                 updateKSPlayerMediaKind()
             }
+            logHealthIfNeeded(position: currentTime, bufferedDuration: nil, decoderType: .software)
+            detectFrozenPlayback(position: currentTime, claimsToBePlaying: state == .bufferFinished)
+            resetRecoveryCircuitIfStable(claimsToBePlaying: state == .bufferFinished)
             return
         }
 
@@ -545,17 +608,15 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         if wasBuffering != isBuffering {
             quadLog.log("[\(self.quadrant.displayName)] buffering \(wasBuffering) -> \(self.isBuffering)")
         }
-        if lastTelemetryBuffering != isBuffering {
-            lastTelemetryBuffering = isBuffering
-            TelemetryReporter.shared.report(
-                deviceCode: DeviceIdentityStore.shared.deviceId,
-                eventType: isBuffering ? .bufferingStart : .bufferingEnd,
-                streamName: streamName,
-                quadrant: quadrant.rawValue,
-                layoutMode: telemetryLayoutMode,
-                decoderType: .hardware
-            )
-        }
+        updateBufferingTelemetry(isBuffering, decoderType: .hardware)
+        let position = finiteSeconds(avPlayer.currentTime())
+        let bufferedDuration = bufferedDurationForAVPlayer()
+        logHealthIfNeeded(position: position, bufferedDuration: bufferedDuration, decoderType: .hardware)
+        detectFrozenPlayback(
+            position: position,
+            claimsToBePlaying: avPlayer.timeControlStatus == .playing && avPlayer.rate > 0
+        )
+        resetRecoveryCircuitIfStable(claimsToBePlaying: avPlayer.timeControlStatus == .playing)
     }
 
     private func updateKSPlayerMediaKind() {
@@ -571,40 +632,314 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         }
     }
 
-    private func performRecovery() {
-        guard let url = originalURL else {
-            markFailed()
+    private func updateBufferingTelemetry(
+        _ buffering: Bool,
+        decoderType: TelemetryDecoderType
+    ) {
+        if buffering {
+            if bufferingCandidateAt == nil { bufferingCandidateAt = Date() }
+            guard !bufferingTelemetryReported,
+                  let candidate = bufferingCandidateAt,
+                  Date().timeIntervalSince(candidate) >= 1 else { return }
+            bufferingTelemetryReported = true
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: .bufferingStart,
+                channelId: currentChannelId,
+                streamName: streamName,
+                quadrant: quadrant.rawValue,
+                layoutMode: telemetryLayoutMode,
+                decoderType: decoderType
+            )
             return
         }
-        let nextAttempt = recoveryAttempt + 1
-        recoveryAttempt = nextAttempt
-        if nextAttempt > 3 {
-            markFailed()
-            return
+
+        bufferingCandidateAt = nil
+        guard bufferingTelemetryReported else { return }
+        bufferingTelemetryReported = false
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .bufferingEnd,
+            channelId: currentChannelId,
+            streamName: streamName,
+            quadrant: quadrant.rawValue,
+            layoutMode: telemetryLayoutMode,
+            decoderType: decoderType
+        )
+    }
+
+    private func logHealthIfNeeded(
+        position: TimeInterval,
+        bufferedDuration: TimeInterval?,
+        decoderType: TelemetryDecoderType
+    ) {
+        let now = Date()
+        guard now.timeIntervalSince(lastHealthSnapshotAt) >= 5 else { return }
+        lastHealthSnapshotAt = now
+
+        var metadata: [String: String] = [
+            "state": playbackStateName,
+            "isBuffering": isBuffering.description,
+            "positionMs": milliseconds(position),
+            "physicalMemoryMB": bufferProfile.physicalMemoryMB.description,
+            "preferredBufferMs": milliseconds(bufferProfile.preferredForwardDuration),
+        ]
+        if let bufferedDuration {
+            metadata["bufferedDurationMs"] = milliseconds(bufferedDuration)
         }
-        quadLog.log("[\(self.quadrant.displayName)] recovery attempt \(self.recoveryAttempt)")
-        Task {
-            let name = streamName
-            let logo = logoURL?.absoluteString
-            await play(urlString: url.absoluteString, name: name, logoURLString: logo)
-            recoveryAttempt = nextAttempt
+        if let item = avPlayer.currentItem,
+           let event = item.accessLog()?.events.last {
+            metadata["observedBitrate"] = String(Int(event.observedBitrate))
+            metadata["indicatedBitrate"] = String(Int(event.indicatedBitrate))
+            metadata["stalls"] = event.numberOfStalls.description
+            if event.numberOfMediaRequests != lastAccessLogRequestCount {
+                lastAccessLogRequestCount = event.numberOfMediaRequests
+                TelemetryReporter.shared.report(
+                    deviceCode: DeviceIdentityStore.shared.deviceId,
+                    eventType: .streamLoad,
+                    channelId: currentChannelId,
+                    streamName: streamName,
+                    streamUrl: currentURL?.absoluteString,
+                    quadrant: quadrant.rawValue,
+                    layoutMode: telemetryLayoutMode,
+                    decoderType: decoderType,
+                    bitrate: event.observedBitrate,
+                    durationMs: Int(event.transferDuration * 1_000),
+                    metadata: [
+                        "result": "success",
+                        "mediaRequests": event.numberOfMediaRequests.description,
+                        "bytesTransferred": event.numberOfBytesTransferred.description,
+                    ]
+                )
+            }
+        }
+
+        let healthChannelId = currentChannelId ?? "none"
+        let healthBufferedDuration = metadata["bufferedDurationMs"] ?? "unknown"
+        playbackHealthLog.info(
+            "event=health stream=\(self.streamIdentity, privacy: .public) channelId=\(healthChannelId, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public) state=\(self.playbackStateName, privacy: .public) positionMs=\(self.milliseconds(position), privacy: .public) bufferedDurationMs=\(healthBufferedDuration, privacy: .public)"
+        )
+        if PlaybackRecoveryPolicy.shouldEmitRoutineHealth(
+            lastEmittedAt: lastHealthTelemetryAt,
+            now: now
+        ) {
+            lastHealthTelemetryAt = now
+            TelemetryReporter.shared.report(
+                deviceCode: DeviceIdentityStore.shared.deviceId,
+                eventType: .playbackHealth,
+                channelId: currentChannelId,
+                streamName: streamName,
+                streamUrl: currentURL?.absoluteString,
+                quadrant: quadrant.rawValue,
+                layoutMode: telemetryLayoutMode,
+                decoderType: decoderType,
+                metadata: metadata
+            )
         }
     }
 
-    private func markFailed() {
+    private func detectFrozenPlayback(position: TimeInterval, claimsToBePlaying: Bool) {
+        let now = Date()
+        if lastObservedPosition < 0 || position > lastObservedPosition + 0.25 {
+            lastObservedPosition = position
+            lastPositionAdvancedAt = now
+            return
+        }
+        guard PlaybackRecoveryPolicy.isFrozen(
+            claimsToBePlaying: claimsToBePlaying,
+            lastPositionAdvancedAt: lastPositionAdvancedAt,
+            now: now
+        ),
+              now.timeIntervalSince(lastStallRecoveryAt) >= 20 else { return }
+        lastStallRecoveryAt = now
+        playbackHealthLog.warning(
+            "event=frozen_recovery stream=\(self.streamIdentity, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public)"
+        )
+        recoverToLiveEdge()
+    }
+
+    private func recoverToLiveEdge() {
+        let now = Date()
+        lastPlaybackErrorAt = now
+        recentRecoveryTimes = PlaybackRecoveryPolicy.recoveriesWithinWindow(
+            recentRecoveryTimes,
+            now: now
+        )
+        recentRecoveryTimes.append(now)
+        if PlaybackRecoveryPolicy.shouldEnterOfflineProbe(after: recentRecoveryTimes, now: now) {
+            recentRecoveryTimes.removeAll()
+            enterOfflineProbe(reason: "unsustainable_live_window")
+            return
+        }
+
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .liveRecovery,
+            channelId: currentChannelId,
+            streamName: streamName,
+            streamUrl: currentURL?.absoluteString,
+            quadrant: quadrant.rawValue,
+            layoutMode: telemetryLayoutMode,
+            metadata: ["state": playbackStateName]
+        )
+        if isUsingKSPlayer {
+            performRecovery(reason: "live_edge")
+            return
+        }
+        guard let range = avPlayer.currentItem?.seekableTimeRanges.last?.timeRangeValue else {
+            performRecovery(reason: "live_edge_unavailable")
+            return
+        }
+        let liveEdge = CMTimeRangeGetEnd(range)
+        let target = CMTimeSubtract(liveEdge, CMTime(seconds: 6, preferredTimescale: 600))
+        avPlayer.seek(to: target > range.start ? target : range.start, toleranceBefore: .zero, toleranceAfter: .zero)
+        avPlayer.play()
+    }
+
+    private func performRecovery(reason: String = "playback_error") {
+        guard let url = originalURL else {
+            enterOfflineProbe(reason: reason)
+            return
+        }
+        lastPlaybackErrorAt = Date()
+        let nextAttempt = recoveryAttempt + 1
+        recoveryAttempt = nextAttempt
+        if nextAttempt > 3 {
+            enterOfflineProbe(reason: reason)
+            return
+        }
+        quadLog.log("[\(self.quadrant.displayName)] recovery attempt \(self.recoveryAttempt) reason=\(reason, privacy: .public)")
+        Task {
+            let name = streamName
+            let logo = logoURL?.absoluteString
+            let channelId = currentChannelId
+            await play(
+                urlString: url.absoluteString,
+                name: name,
+                logoURLString: logo,
+                channelId: channelId,
+                preserveRecoveryState: true
+            )
+            recoveryAttempt = nextAttempt
+            lastPlaybackErrorAt = Date()
+        }
+    }
+
+    private func enterOfflineProbe(reason: String) {
+        guard offlineProbeTask == nil, let url = originalURL else { return }
+        lastPlaybackErrorAt = Date()
+        offlineProbeCount += 1
+        let delay = PlaybackRecoveryPolicy.probeDelay(forAttempt: offlineProbeCount)
         isFailed = true
         isBuffering = false
+        failureStatus = reason == "unsustainable_live_window" ? "FEED TOO SLOW" : "FEED OFFLINE"
+
+        let failedDecoderType: TelemetryDecoderType = isUsingKSPlayer ? .software : .hardware
+        releaseEnginesForOfflineProbe()
+        playbackHealthLog.warning(
+            "event=source_offline stream=\(self.streamIdentity, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public) reason=\(reason, privacy: .public) probe=\(self.offlineProbeCount) nextProbeSeconds=\(delay)"
+        )
 
         TelemetryReporter.shared.report(
             deviceCode: DeviceIdentityStore.shared.deviceId,
             eventType: .playbackFailure,
+            channelId: currentChannelId,
             streamName: streamName,
+            streamUrl: currentURL?.absoluteString,
             quadrant: quadrant.rawValue,
             layoutMode: telemetryLayoutMode,
-            decoderType: isUsingKSPlayer ? .software : .hardware,
-            errorReason: "max_recovery_attempts"
+            decoderType: failedDecoderType,
+            errorReason: reason,
+            metadata: [
+                "probe": offlineProbeCount.description,
+                "nextProbeMs": milliseconds(delay),
+            ]
         )
-        onPlaybackFailure?("max_recovery_attempts")
+        onPlaybackFailure?(reason)
+
+        let name = streamName
+        let logo = logoURL?.absoluteString
+        let channelId = currentChannelId
+        offlineProbeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.offlineProbeTask = nil
+            await self.play(
+                urlString: url.absoluteString,
+                name: name,
+                logoURLString: logo,
+                channelId: channelId,
+                preserveRecoveryState: true
+            )
+        }
+    }
+
+    private func releaseEnginesForOfflineProbe() {
+        updateTask?.cancel()
+        updateTask = nil
+        trackDetectionTask?.cancel()
+        trackDetectionTask = nil
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let errorObserver { NotificationCenter.default.removeObserver(errorObserver) }
+        endObserver = nil
+        errorObserver = nil
+        ksCoordinator?.resetPlayer()
+        ksCoordinator = nil
+        avPlayer.pause()
+        avPlayer.replaceCurrentItem(with: nil)
+        isUsingKSPlayer = false
+        audioPeakMonitor.reset()
+    }
+
+    private func resetRecoveryCircuitIfStable(claimsToBePlaying: Bool) {
+        guard let lastPlaybackErrorAt,
+              PlaybackRecoveryPolicy.shouldResetCircuit(
+                  claimsToBePlaying: claimsToBePlaying,
+                  stablePlaybackStartedAt: lastPlaybackErrorAt,
+                  now: Date()
+              ) else { return }
+        offlineProbeCount = 0
+        recoveryAttempt = 0
+        recentRecoveryTimes.removeAll()
+        self.lastPlaybackErrorAt = nil
+        isFailed = false
+        playbackHealthLog.info(
+            "event=recovery_circuit_reset stream=\(self.streamIdentity, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public)"
+        )
+        onStableRecovery?()
+    }
+
+    private var streamIdentity: String {
+        streamName ?? currentURL?.absoluteString ?? originalURL?.absoluteString ?? "unknown"
+    }
+
+    private var playbackStateName: String {
+        if isUsingKSPlayer { return String(describing: ksCoordinator?.state ?? .initialized) }
+        switch avPlayer.timeControlStatus {
+        case .paused: return "paused"
+        case .waitingToPlayAtSpecifiedRate: return "buffering"
+        case .playing: return "ready"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func bufferedDurationForAVPlayer() -> TimeInterval {
+        guard let item = avPlayer.currentItem else { return 0 }
+        let position = finiteSeconds(avPlayer.currentTime())
+        let end = item.loadedTimeRanges
+            .map(\.timeRangeValue)
+            .map { finiteSeconds(CMTimeRangeGetEnd($0)) }
+            .max() ?? position
+        return max(0, end - position)
+    }
+
+    private func finiteSeconds(_ time: CMTime) -> TimeInterval {
+        let seconds = time.seconds
+        return seconds.isFinite ? seconds : 0
+    }
+
+    private func milliseconds(_ seconds: TimeInterval) -> String {
+        String(Int(max(0, seconds) * 1_000))
     }
 }
 
@@ -630,9 +965,20 @@ final class QuadPlayerController: ObservableObject {
         return newPlayer
     }
 
-    func play(urlString: String, name: String?, logoURLString: String? = nil, quadrant: Quadrant) async {
+    func play(
+        urlString: String,
+        name: String?,
+        logoURLString: String? = nil,
+        channelId: String? = nil,
+        quadrant: Quadrant
+    ) async {
         isActive = true
-        await player(for: quadrant).play(urlString: urlString, name: name, logoURLString: logoURLString)
+        await player(for: quadrant).play(
+            urlString: urlString,
+            name: name,
+            logoURLString: logoURLString,
+            channelId: channelId
+        )
         applyVolumes()
     }
 

@@ -25,22 +25,24 @@ final class EmergencyPlayerController: ObservableObject {
     @Published private(set) var viewportPlayers: [QuadrantPlayer]
     @Published private(set) var visibleSlots: [Int?] = [nil, nil]
     @Published private(set) var healthySlots: [Int] = []
+    @Published private(set) var assignedSlots: [Int] = []
+    @Published private(set) var offlineSlots: Set<Int> = []
     @Published private(set) var focusedViewport = 0
 
     private var channels: [Int: EmergencyChannel] = [:]
     private var channelOrder: [Int] = []
-    private var blockedSlots: Set<Int> = []
     private var windowStartSlot: Int?
+    private var probePlayers: [Int: QuadrantPlayer] = [:]
 
     init() {
         viewportPlayers = [
             QuadrantPlayer(quadrant: .topLeft, layoutMode: .emergency),
             QuadrantPlayer(quadrant: .topRight, layoutMode: .emergency),
         ]
-        bindFailureCallbacks()
+        bindCallbacks()
     }
 
-    var hasChannels: Bool { !healthySlots.isEmpty }
+    var hasChannels: Bool { !channels.isEmpty }
 
     func play(
         slot: Int,
@@ -61,6 +63,10 @@ final class EmergencyPlayerController: ObservableObject {
             name: name,
             logoURLString: logoURLString
         )
+        if channels[slot] != channel {
+            probePlayers.removeValue(forKey: slot)?.stop()
+            offlineSlots.remove(slot)
+        }
         if let duplicate = channels.values.first(where: {
             $0.slot != slot && $0.identity == channel.identity
         }) {
@@ -69,7 +75,8 @@ final class EmergencyPlayerController: ObservableObject {
             )
             channels.removeValue(forKey: slot)
             channelOrder.removeAll { $0 == slot }
-            blockedSlots.remove(slot)
+            probePlayers.removeValue(forKey: slot)?.stop()
+            offlineSlots.remove(slot)
             if windowStartSlot == slot { windowStartSlot = duplicate.slot }
             await renderWindow()
             return
@@ -77,14 +84,14 @@ final class EmergencyPlayerController: ObservableObject {
 
         if channels[slot] == nil { channelOrder.append(slot) }
         channels[slot] = channel
-        blockedSlots.remove(slot)
         if windowStartSlot == nil { windowStartSlot = slot }
 
         if let viewport = visibleSlots.firstIndex(where: { $0 == slot }) {
             await viewportPlayers[viewport].play(
                 urlString: urlString,
                 name: name,
-                logoURLString: logoURLString
+                logoURLString: logoURLString,
+                channelId: channelId
             )
             publishCarouselState()
         } else {
@@ -102,7 +109,8 @@ final class EmergencyPlayerController: ObservableObject {
         let wasFirst = visibleSlots[0] == slot
         channels.removeValue(forKey: slot)
         channelOrder.removeAll { $0 == slot }
-        blockedSlots.remove(slot)
+        probePlayers.removeValue(forKey: slot)?.stop()
+        offlineSlots.remove(slot)
         if wasFirst { windowStartSlot = visibleSlots[1] }
         await renderWindow()
     }
@@ -110,19 +118,26 @@ final class EmergencyPlayerController: ObservableObject {
     func stopAll() {
         channels.removeAll()
         channelOrder.removeAll()
-        blockedSlots.removeAll()
+        probePlayers.values.forEach { $0.stop() }
+        probePlayers.removeAll()
+        offlineSlots.removeAll()
         windowStartSlot = nil
         visibleSlots = [nil, nil]
         healthySlots = []
+        assignedSlots = []
         focusedViewport = 0
         viewportPlayers.forEach { $0.stop() }
         updateIdleTimer()
     }
 
     func restart(slot: Int) {
+        if let probePlayer = probePlayers[slot] {
+            probePlayer.restart()
+            return
+        }
         if let viewport = visibleSlots.firstIndex(where: { $0 == slot }) {
             viewportPlayers[viewport].restart()
-        } else if channels[slot] != nil, !blockedSlots.contains(slot) {
+        } else if channels[slot] != nil {
             windowStartSlot = slot
             Task { await renderWindow() }
         }
@@ -150,7 +165,7 @@ final class EmergencyPlayerController: ObservableObject {
     }
 
     func focusAudio(slot: Int) {
-        guard channels[slot] != nil, !blockedSlots.contains(slot) else { return }
+        guard channels[slot] != nil else { return }
         if let viewport = visibleSlots.firstIndex(where: { $0 == slot }) {
             focusedViewport = viewport
             applyAudioFocus()
@@ -180,10 +195,10 @@ final class EmergencyPlayerController: ObservableObject {
     }
 
     private func healthyChannels() -> [EmergencyChannel] {
-        channelOrder.compactMap { slot in
-            guard !blockedSlots.contains(slot) else { return nil }
-            return channels[slot]
-        }
+        EmergencyCarouselPolicy.healthySlots(
+            assignedSlots: channelOrder,
+            offlineSlots: offlineSlots
+        ).compactMap { channels[$0] }
     }
 
     private func renderWindow() async {
@@ -216,11 +231,13 @@ final class EmergencyPlayerController: ObservableObject {
                 continue
             }
             if visibleSlots[viewport] != channel.slot {
+                viewportPlayers[viewport].stop()
                 visibleSlots[viewport] = channel.slot
                 await viewportPlayers[viewport].play(
                     urlString: channel.urlString,
                     name: channel.name,
-                    logoURLString: channel.logoURLString
+                    logoURLString: channel.logoURLString,
+                    channelId: channel.channelId
                 )
             }
         }
@@ -230,25 +247,60 @@ final class EmergencyPlayerController: ObservableObject {
         publishCarouselState()
     }
 
-    private func bindFailureCallbacks() {
+    private func bindCallbacks() {
         for player in viewportPlayers {
             player.onPlaybackFailure = { [weak self, weak player] reason in
                 guard let self, let player else { return }
                 self.handlePlaybackFailure(player: player, reason: reason)
+            }
+            player.onStableRecovery = { [weak self, weak player] in
+                guard let self, let player else { return }
+                self.handleStableRecovery(player: player)
             }
         }
     }
 
     private func handlePlaybackFailure(player: QuadrantPlayer, reason: String?) {
         guard let viewport = viewportPlayers.firstIndex(where: { $0 === player }),
-              let failedSlot = visibleSlots[viewport],
-              !blockedSlots.contains(failedSlot) else { return }
+              let failedSlot = visibleSlots[viewport] else { return }
 
-        emergencyLog.error("Blocking failed emergency position \(failedSlot)")
-        blockedSlots.insert(failedSlot)
-        if windowStartSlot == failedSlot { windowStartSlot = visibleSlots[1] }
-        notifyBackendBlocked(slot: failedSlot, reason: reason)
+        let failureReason = reason ?? "unknown"
+        offlineSlots.insert(failedSlot)
+        probePlayers[failedSlot] = player
+        let replacement = QuadrantPlayer(
+            quadrant: viewport == 0 ? .topLeft : .topRight,
+            layoutMode: .emergency
+        )
+        viewportPlayers[viewport] = replacement
+        visibleSlots[viewport] = nil
+        bindCallbacks(for: replacement)
+        emergencyLog.error(
+            "Emergency position \(failedSlot) remains assigned and will be probed again; reason=\(failureReason)"
+        )
         Task { await renderWindow() }
+    }
+
+    private func handleStableRecovery(player: QuadrantPlayer) {
+        guard let recoveredSlot = probePlayers.first(where: { $0.value === player })?.key else {
+            return
+        }
+        probePlayers.removeValue(forKey: recoveredSlot)
+        offlineSlots.remove(recoveredSlot)
+        player.stop()
+        if windowStartSlot == nil { windowStartSlot = recoveredSlot }
+        emergencyLog.info("Emergency position \(recoveredSlot) recovered and returned to the carousel")
+        Task { await renderWindow() }
+    }
+
+    private func bindCallbacks(for player: QuadrantPlayer) {
+        player.onPlaybackFailure = { [weak self, weak player] reason in
+            guard let self, let player else { return }
+            self.handlePlaybackFailure(player: player, reason: reason)
+        }
+        player.onStableRecovery = { [weak self, weak player] in
+            guard let self, let player else { return }
+            self.handleStableRecovery(player: player)
+        }
     }
 
     private func applyAudioFocus() {
@@ -258,35 +310,13 @@ final class EmergencyPlayerController: ObservableObject {
     }
 
     private func publishCarouselState() {
+        assignedSlots = channelOrder.filter { channels[$0] != nil }
         healthySlots = healthyChannels().map(\.slot)
         updateIdleTimer()
     }
 
     private func updateIdleTimer() {
-        UIApplication.shared.isIdleTimerDisabled = !healthySlots.isEmpty
+        UIApplication.shared.isIdleTimerDisabled = !channels.isEmpty
     }
 
-    private func notifyBackendBlocked(slot: Int, reason: String?) {
-        guard let url = URL(
-            string: "https://api.celesti.gaulatti.com/devices/emergency/block/\(slot)"
-        ) else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue(DeviceIdentityStore.shared.deviceId, forHTTPHeaderField: "X-Device-ID")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(
-            withJSONObject: ["reason": reason ?? "playback failure"]
-        )
-
-        Task {
-            do {
-                let (_, response) = try await URLSession.shared.data(for: request)
-                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                    emergencyLog.warning("Backend block response: \(http.statusCode)")
-                }
-            } catch {
-                emergencyLog.error("Unable to persist blocked emergency channel: \(error)")
-            }
-        }
-    }
 }

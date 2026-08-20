@@ -35,6 +35,21 @@ struct EmergencyPlaybackView: View {
                 .frame(width: proxy.size.width, height: channelHeight)
                 .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
 
+                if !appModel.emergencyPlayerController.assignedSlots.isEmpty,
+                   appModel.emergencyPlayerController.healthySlots.isEmpty {
+                    VStack(spacing: 12) {
+                        Text("ALL ASSIGNED FEEDS OFFLINE")
+                            .font(.custom("EncodeSans-Bold", size: 30))
+                        Text("Automatic recovery checks are running")
+                            .font(.custom("LibreFranklin-Medium", size: 20))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 32)
+                    .padding(.vertical, 24)
+                    .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
+                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                }
+
                 if appModel.emergencyPlayerController.healthySlots.count > 2 {
                     EmergencyCarouselDots(
                         healthySlots: appModel.emergencyPlayerController.healthySlots,
