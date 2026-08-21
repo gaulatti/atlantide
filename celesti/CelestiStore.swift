@@ -732,7 +732,7 @@ final class PlayerController: NSObject, ObservableObject {
             )
         }
 
-        UIApplication.shared.isIdleTimerDisabled = false
+        UIApplication.shared.isIdleTimerDisabled = PlaybackIdleTimerPolicy.isDisabled(for: .inactive)
     }
 
     func openYouTube(videoId: String) {
@@ -971,7 +971,7 @@ final class PlayerController: NSObject, ObservableObject {
         )
 
         DispatchQueue.main.async {
-            UIApplication.shared.isIdleTimerDisabled = true
+            UIApplication.shared.isIdleTimerDisabled = PlaybackIdleTimerPolicy.isDisabled(for: .playing)
         }
     }
 
@@ -1031,7 +1031,7 @@ final class PlayerController: NSObject, ObservableObject {
             }
         }
 
-        UIApplication.shared.isIdleTimerDisabled = true
+        UIApplication.shared.isIdleTimerDisabled = PlaybackIdleTimerPolicy.isDisabled(for: .playing)
     }
 
     private func handleKSStateChange(state: KSPlayerState) {
@@ -1530,7 +1530,7 @@ final class PlayerController: NSObject, ObservableObject {
         player.replaceCurrentItem(with: nil)
         isUsingKSPlayer = false
         recoveryAttempt = 0
-        UIApplication.shared.isIdleTimerDisabled = true
+        UIApplication.shared.isIdleTimerDisabled = PlaybackIdleTimerPolicy.isDisabled(for: .offlineProbe)
         currentPresentation = PlaybackPresentation(
             source: currentSource ?? .remoteCommand,
             radioName: currentRadioName,

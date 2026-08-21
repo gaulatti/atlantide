@@ -27,6 +27,12 @@ import Testing
     #expect(PlaybackRecoveryPolicy.shouldEmitRoutineHealth(lastEmittedAt: now.addingTimeInterval(-30), now: now))
 }
 
+@Test func idleTimerStaysDisabledOnlyDuringActivePlayback() {
+    #expect(PlaybackIdleTimerPolicy.isDisabled(for: .playing))
+    #expect(!PlaybackIdleTimerPolicy.isDisabled(for: .inactive))
+    #expect(!PlaybackIdleTimerPolicy.isDisabled(for: .offlineProbe))
+}
+
 @Test func emergencyCarouselPreservesAssignmentsWhileSkippingAndRestoringFailures() {
     let assigned = [0, 1, 2, 3]
     #expect(EmergencyCarouselPolicy.visibleSlots(assignedSlots: assigned, offlineSlots: [], windowStartSlot: 0) == [0, 1])

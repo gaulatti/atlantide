@@ -1,5 +1,17 @@
 import Foundation
 
+enum PlaybackIdleTimerState {
+    case inactive
+    case playing
+    case offlineProbe
+}
+
+enum PlaybackIdleTimerPolicy {
+    static func isDisabled(for state: PlaybackIdleTimerState) -> Bool {
+        state == .playing
+    }
+}
+
 enum TelemetryLayoutMode: String, Encodable {
     case single
     case quad
