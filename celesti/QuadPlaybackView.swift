@@ -91,7 +91,7 @@ struct QuadrantCell: View {
                 Color(red: 139 / 255, green: 0, blue: 0)
                     .opacity(0.85)
                 VStack(spacing: 12) {
-                    Text("FAILED")
+                    Text(player.failureStatus)
                         .font(CelestiTypography.body(size: 18, weight: .bold))
                         .tracking(6)
                         .foregroundStyle(.white.opacity(0.7))

@@ -4,7 +4,7 @@ import OSLog
 private let telemetryLog = Logger(subsystem: "com.gaulatti.celesti", category: "Telemetry")
 
 enum TelemetryPlatform: String, Encodable {
-    case ios
+    case tvos
 }
 
 enum TelemetryEventType: String, Encodable {
@@ -16,18 +16,15 @@ enum TelemetryEventType: String, Encodable {
     case bufferingEnd = "buffering_end"
     case decoderInitialized = "decoder_initialized"
     case bitrateChanged = "bitrate_changed"
+    case playbackHealth = "playback_health"
+    case streamLoad = "stream_load"
+    case liveRecovery = "live_recovery"
 }
 
 enum TelemetryDecoderType: String, Encodable {
     case hardware
     case software
     case unknown
-}
-
-enum TelemetryLayoutMode: String, Encodable {
-    case single
-    case quad
-    case emergency
 }
 
 struct TelemetryEvent: Encodable {
@@ -75,6 +72,7 @@ final class TelemetryReporter {
     func report(
         deviceCode: String,
         eventType: TelemetryEventType,
+        channelId: String? = nil,
         streamName: String? = nil,
         streamUrl: String? = nil,
         quadrant: Int? = nil,
@@ -91,11 +89,11 @@ final class TelemetryReporter {
 
         let event = TelemetryEvent(
             deviceCode: deviceCode,
-            platform: .ios,
+            platform: .tvos,
             eventType: eventType,
-            channelId: activeChannelId,
-            streamName: streamName,
-            streamUrl: streamUrl,
+            channelId: TelemetryPrivacy.boundedIdentity(channelId ?? activeChannelId),
+            streamName: TelemetryPrivacy.boundedIdentity(streamName),
+            streamUrl: TelemetryPrivacy.sanitizedStreamURL(streamUrl),
             quadrant: quadrant,
             layoutMode: layoutMode,
             decoderType: decoderType,
@@ -104,14 +102,14 @@ final class TelemetryReporter {
             errorCode: errorCode,
             errorReason: errorReason,
             durationMs: durationMs,
-            metadata: metadata
+            metadata: TelemetryPrivacy.boundedMetadata(metadata)
         )
 
         var request = URLRequest(url: baseURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(deviceCode, forHTTPHeaderField: "X-Device-ID")
-        request.setValue("ios", forHTTPHeaderField: "X-Platform")
+        request.setValue("tvos", forHTTPHeaderField: "X-Platform")
 
         do {
             request.httpBody = try JSONEncoder().encode(event)
@@ -124,7 +122,10 @@ final class TelemetryReporter {
             if let error {
                 telemetryLog.debug("Telemetry report failed: \(error, privacy: .public)")
             } else if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
-                telemetryLog.debug("Telemetry report returned status \(http.statusCode)")
+                let rejectedStream = streamName ?? "unknown"
+                telemetryLog.warning(
+                    "Telemetry rejected event=\(eventType.rawValue, privacy: .public) status=\(http.statusCode) stream=\(rejectedStream, privacy: .public)"
+                )
             }
         }.resume()
     }
