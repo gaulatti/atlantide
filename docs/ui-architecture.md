@@ -40,3 +40,36 @@ presentation state into Sabella component inputs and attach product-specific
 remote actions. New visual primitives must be added to Sabella with a catalog
 fixture before Atlantide consumes them; do not add local fonts, colors, view
 modifiers, component styling, or brand artwork here.
+
+## Channel viewing history foundation
+
+`ActiveChannelViewingAccumulator` is a pure, unwired timing state machine for a
+future live-player adapter. It counts only monotonic time spent continuously in
+`playing` for one authoritative channel ID. Buffering, pause, app inactivity,
+failure, stop, and channel changes close the active interval without counting
+their elapsed time. Wall-clock values only anchor the segment timestamps, so a
+wall-clock adjustment cannot change `activeSeconds`.
+
+The adapter must call `checkpoint()` no later than each 60-second boundary
+while playback remains active. Each successful checkpoint first atomically
+persists one or more segments of at most 60 seconds to
+`DurableChannelViewingOutbox`; the remaining unpersisted whole and fractional
+interval is then strictly less than 60 seconds. A non-playing transition flushes
+the whole-second remainder and discards only sub-second residue. If persistence
+fails or the bounded outbox is full, the transition fails without advancing the
+checkpoint, so the adapter must surface the failure and stop claiming that
+viewing history is current.
+
+The outbox stores a deterministic JSON document with schema version `1` and
+retains the original client-generated `segmentId` across retries and relaunches.
+It removes a segment only after `recorded` or `duplicate`. A retryable failure
+remains eligible for delivery; a terminal rejection remains durable and visible
+but is skipped by automatic delivery. Corrupt or unknown persisted schemas fail
+closed instead of being overwritten. `FileChannelViewingOutboxPersistence`
+uses an atomic local file write, while tests inject an in-memory store.
+
+No player event adapter, Mattone endpoint, transport implementation, production
+telemetry, or user-visible surface is wired in this foundation. The later
+integration issue owns mapping real Sabella playback transitions, scheduling
+the checkpoint deadline, selecting the app-support file URL, and delivering the
+landed segment contract to Mattone.
