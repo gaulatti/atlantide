@@ -5,6 +5,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var appModel: CelestiAppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -28,6 +29,9 @@ struct ContentView: View {
         }
         .task {
             appModel.startIfNeeded()
+        }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            appModel.handleScenePhase(phase)
         }
         .onExitCommand {
             // Channel playback owns Menu so the first press reveals the guide
@@ -122,6 +126,7 @@ private struct LiveChannelGroupView: View {
                 guard let channel = group.channels.first(where: { $0.id == selected.id }) else { return }
                 appModel.selectLiveChannel(channel)
             },
+            onPlaybackActivityChanged: appModel.handleLiveChannelPlaybackActivity,
             onExit: appModel.leaveChannelGroupPlayback
         )
     }

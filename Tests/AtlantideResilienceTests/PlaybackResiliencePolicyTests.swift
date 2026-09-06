@@ -33,6 +33,23 @@ import Testing
     #expect(!PlaybackIdleTimerPolicy.isDisabled(for: .offlineProbe))
 }
 
+@Test func outOfOrderPlaybackResolutionAcceptsOnlyTheLatestRequest() {
+    var arbiter = PlaybackRequestArbiter()
+    let requestA = arbiter.begin()
+    let requestB = arbiter.begin()
+
+    #expect(!arbiter.accepts(requestA))
+    #expect(arbiter.accepts(requestB))
+    #expect(arbiter.accepts(arbiter.currentRequest()))
+
+    arbiter.invalidate()
+    #expect(!arbiter.accepts(requestB))
+
+    let scheduledBeforeStop = arbiter.currentRequest()
+    arbiter.invalidate()
+    #expect(!arbiter.accepts(scheduledBeforeStop))
+}
+
 @Test func emergencyCarouselPreservesAssignmentsWhileSkippingAndRestoringFailures() {
     let assigned = [0, 1, 2, 3]
     #expect(EmergencyCarouselPolicy.visibleSlots(assignedSlots: assigned, offlineSlots: [], windowStartSlot: 0) == [0, 1])

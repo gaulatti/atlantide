@@ -334,6 +334,122 @@ import Testing
     #expect(await harness.outbox.count == 0)
 }
 
+@Test func fiveWallClockMinutesWithTwoMinutesBufferingDeliversThreeActiveMinutes() async throws {
+    let harness = try ViewingHistoryHarness()
+    let transport = RecordingChannelViewingTransport()
+    let controller = ChannelViewingHistoryController(
+        accumulator: harness.accumulator,
+        outbox: harness.outbox,
+        transport: transport,
+        automaticTasks: false
+    )
+
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .playing))
+    harness.monotonic.advance(by: 120)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .buffering))
+    harness.monotonic.advance(by: 120)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .playing))
+    harness.monotonic.advance(by: 60)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .stopped))
+    await controller.drainAvailableSegmentsNow()
+
+    let delivered = await transport.delivered
+    #expect(delivered.map(\.activeSeconds).reduce(0, +) == 180)
+    #expect(delivered.allSatisfy { (1...60).contains($0.activeSeconds) })
+    #expect(await harness.outbox.count == 0)
+}
+
+@Test func sourceSwitchPauseAndBackgroundCloseAttributionWithoutAcceptingStaleStops() async throws {
+    let harness = try ViewingHistoryHarness()
+    let transport = RecordingChannelViewingTransport()
+    let controller = ChannelViewingHistoryController(
+        accumulator: harness.accumulator,
+        outbox: harness.outbox,
+        transport: transport,
+        automaticTasks: false
+    )
+
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .playing))
+    harness.monotonic.advance(by: 301)
+    await controller.receive(playbackEvent(.onDevice, "channel-b", .starting))
+    await controller.receive(playbackEvent(.onDevice, "channel-b", .playing))
+    harness.monotonic.advance(by: 10)
+    await controller.setApplicationActive(false)
+    harness.monotonic.advance(by: 100)
+    await controller.setApplicationActive(true)
+    harness.monotonic.advance(by: 5)
+    await controller.receive(playbackEvent(.onDevice, "channel-b", .paused))
+    harness.monotonic.advance(by: 40)
+
+    await controller.receive(playbackEvent(.onDevice, "channel-b", .stopped))
+    await controller.receive(playbackEvent(.remoteCommand, "channel-c", .starting))
+    await controller.receive(playbackEvent(.remoteCommand, "channel-c", .playing))
+    harness.monotonic.advance(by: 7)
+    await controller.receive(playbackEvent(.onDevice, "channel-b", .stopped))
+    await controller.receive(playbackEvent(.onDevice, "channel-b", .buffering))
+    await controller.receive(playbackEvent(.onDevice, "channel-b", .playing))
+    harness.monotonic.advance(by: 3)
+    await controller.receive(playbackEvent(.onDevice, "channel-b", .paused))
+    await controller.receive(playbackEvent(.remoteCommand, "channel-c", .stopped))
+    await controller.drainAvailableSegmentsNow()
+
+    let delivered = await transport.delivered
+    let totals = Dictionary(grouping: delivered, by: \.channelId)
+        .mapValues { $0.map(\.activeSeconds).reduce(0, +) }
+    #expect(totals == ["channel-a": 301, "channel-b": 15, "channel-c": 10])
+    #expect(delivered.filter { $0.channelId == "channel-a" }.map(\.activeSeconds) == [60, 60, 60, 60, 60, 1])
+}
+
+@Test func mattoneTransportSendsExactDTOAndClassifiesServerOutcomes() async throws {
+    let endpoint = try #require(URL(string: "http://127.0.0.1:3000/channel-viewing/segments"))
+    let client = ScriptedChannelViewingHTTPClient(
+        responses: [
+            (200, #"{"status":"recorded"}"#),
+            (200, #"{"status":"duplicate"}"#),
+            (404, #"{"message":"Channel not found"}"#),
+            (503, #"{"message":"Unavailable"}"#),
+        ]
+    )
+    let transport = MattoneChannelViewingTransport(
+        endpoint: endpoint,
+        deviceID: "LOCAL-OPERATOR-TV",
+        client: client
+    )
+    let segment = makeSegment(
+        id: UUID(uuidString: "20000000-0000-4000-8000-000000000001")!,
+        channelId: "10000000-0000-4000-8000-000000000001"
+    )
+
+    #expect(await transport.deliver(segment) == .recorded)
+    #expect(await transport.deliver(segment) == .duplicate)
+    #expect(await transport.deliver(segment) == .terminalRejection)
+    #expect(await transport.deliver(segment) == .retryableFailure)
+
+    let requests = await client.requests
+    #expect(requests.count == 4)
+    let request = try #require(requests.first)
+    #expect(request.url == endpoint)
+    #expect(request.httpMethod == "POST")
+    #expect(request.value(forHTTPHeaderField: "X-Device-ID") == "LOCAL-OPERATOR-TV")
+    #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+    let body = try #require(request.httpBody)
+    let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    #expect(Set(json.keys) == Set(["segmentId", "channelId", "activeSeconds", "startedAt", "endedAt"]))
+    #expect(json["segmentIdId"] == nil)
+    #expect(json["segmentId"] as? String == segment.segmentId.uuidString)
+    #expect(json["channelId"] as? String == segment.channelId)
+    #expect(json["activeSeconds"] as? Int == segment.activeSeconds)
+    #expect(json["startedAt"] as? String == "1970-01-01T00:16:40Z")
+    #expect(json["endedAt"] as? String == "1970-01-01T00:16:50Z")
+}
+
+@Test func retryScheduleIsBoundedAtThirtySeconds() {
+    var schedule = ChannelViewingRetrySchedule()
+    #expect((0..<8).map { _ in schedule.nextDelaySeconds() } == [1, 2, 4, 8, 16, 30, 30, 30])
+    schedule.reset()
+    #expect(schedule.nextDelaySeconds() == 1)
+}
+
 private struct ViewingHistoryHarness {
     let persistence: MemoryChannelViewingPersistence
     let monotonic: TestMonotonicClock
@@ -445,6 +561,38 @@ private final class SequenceChannelViewingIDSource: ChannelViewingSegmentIDSourc
     }
 }
 
+private actor RecordingChannelViewingTransport: ChannelViewingTransport {
+    private(set) var delivered: [ChannelViewingSegment] = []
+
+    func deliver(_ segment: ChannelViewingSegment) async -> ChannelViewingDeliveryOutcome {
+        delivered.append(segment)
+        return .recorded
+    }
+}
+
+private actor ScriptedChannelViewingHTTPClient: ChannelViewingHTTPClient {
+    private var responses: [(Int, String)]
+    private(set) var requests: [URLRequest] = []
+
+    init(responses: [(Int, String)]) {
+        self.responses = responses
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        requests.append(request)
+        let response = responses.removeFirst()
+        return (
+            Data(response.1.utf8),
+            HTTPURLResponse(
+                url: request.url!,
+                statusCode: response.0,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+        )
+    }
+}
+
 private actor ScriptedChannelViewingTransport: ChannelViewingTransport {
     private var outcomes: [ChannelViewingDeliveryOutcome]
     private let persistence: MemoryChannelViewingPersistence
@@ -465,6 +613,14 @@ private actor ScriptedChannelViewingTransport: ChannelViewingTransport {
         deliveredSegmentIds.append(segment.segmentId)
         return outcomes.removeFirst()
     }
+}
+
+private func playbackEvent(
+    _ source: ChannelViewingPlaybackSource,
+    _ channelID: String,
+    _ state: ChannelViewingPlaybackState
+) -> ChannelViewingPlaybackEvent {
+    ChannelViewingPlaybackEvent(source: source, channelID: channelID, state: state)
 }
 
 private func makeSegment(

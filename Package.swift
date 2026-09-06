@@ -3,7 +3,10 @@ import PackageDescription
 
 let package = Package(
     name: "AtlantideResilience",
-    platforms: [.tvOS(.v26)],
+    platforms: [
+        .macOS(.v14),
+        .tvOS(.v26),
+    ],
     products: [
         .library(name: "AtlantideResilience", targets: ["AtlantideResilience"]),
     ],
@@ -27,6 +30,7 @@ let package = Package(
             ],
             sources: [
                 "ChannelViewingHistory.swift",
+                "ChannelViewingRuntime.swift",
                 "PlaybackResiliencePolicy.swift",
             ]
         ),

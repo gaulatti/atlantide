@@ -1,6 +1,6 @@
 import Foundation
 
-struct ChannelViewingSegment: Codable, Equatable, Sendable {
+nonisolated struct ChannelViewingSegment: Codable, Equatable, Sendable {
     let segmentId: UUID
     let channelId: String
     let activeSeconds: Int
@@ -8,7 +8,7 @@ struct ChannelViewingSegment: Codable, Equatable, Sendable {
     let endedAt: Date
 }
 
-enum ChannelPlaybackActivity: Equatable, Sendable {
+nonisolated enum ChannelPlaybackActivity: Equatable, Sendable {
     case playing(channelId: String)
     case buffering
     case paused
@@ -18,53 +18,53 @@ enum ChannelPlaybackActivity: Equatable, Sendable {
     case channelChanged(to: String?)
 }
 
-enum ChannelViewingDeliveryOutcome: Equatable, Sendable {
+nonisolated enum ChannelViewingDeliveryOutcome: Equatable, Sendable {
     case recorded
     case duplicate
     case retryableFailure
     case terminalRejection
 }
 
-protocol ChannelViewingTransport: Sendable {
+nonisolated protocol ChannelViewingTransport: Sendable {
     func deliver(_ segment: ChannelViewingSegment) async -> ChannelViewingDeliveryOutcome
 }
 
-protocol ChannelViewingOutboxPersistence: Sendable {
+nonisolated protocol ChannelViewingOutboxPersistence: Sendable {
     func load() throws -> Data?
     func save(_ data: Data) throws
 }
 
-protocol ChannelViewingMonotonicClock: Sendable {
+nonisolated protocol ChannelViewingMonotonicClock: Sendable {
     func now() -> TimeInterval
 }
 
-protocol ChannelViewingWallClock: Sendable {
+nonisolated protocol ChannelViewingWallClock: Sendable {
     func now() -> Date
 }
 
-protocol ChannelViewingSegmentIDSource: Sendable {
+nonisolated protocol ChannelViewingSegmentIDSource: Sendable {
     func next() -> UUID
 }
 
-struct SystemChannelViewingMonotonicClock: ChannelViewingMonotonicClock {
+nonisolated struct SystemChannelViewingMonotonicClock: ChannelViewingMonotonicClock {
     func now() -> TimeInterval {
         ProcessInfo.processInfo.systemUptime
     }
 }
 
-struct SystemChannelViewingWallClock: ChannelViewingWallClock {
+nonisolated struct SystemChannelViewingWallClock: ChannelViewingWallClock {
     func now() -> Date {
         Date()
     }
 }
 
-struct RandomChannelViewingSegmentIDSource: ChannelViewingSegmentIDSource {
+nonisolated struct RandomChannelViewingSegmentIDSource: ChannelViewingSegmentIDSource {
     func next() -> UUID {
         UUID()
     }
 }
 
-struct FileChannelViewingOutboxPersistence: ChannelViewingOutboxPersistence {
+nonisolated struct FileChannelViewingOutboxPersistence: ChannelViewingOutboxPersistence {
     let fileURL: URL
 
     func load() throws -> Data? {
@@ -81,7 +81,7 @@ struct FileChannelViewingOutboxPersistence: ChannelViewingOutboxPersistence {
     }
 }
 
-enum ChannelViewingOutboxError: Error, Equatable {
+nonisolated enum ChannelViewingOutboxError: Error, Equatable {
     case corruptState
     case unsupportedSchemaVersion(Int)
     case invalidCapacity(Int)
@@ -90,24 +90,24 @@ enum ChannelViewingOutboxError: Error, Equatable {
     case conflictingSegment(UUID)
 }
 
-enum ChannelViewingAccumulatorError: Error, Equatable {
+nonisolated enum ChannelViewingAccumulatorError: Error, Equatable {
     case emptyChannelId
     case monotonicClockMovedBackward
 }
 
-enum ChannelViewingOutboxEntryStatus: String, Codable, Equatable, Sendable {
+nonisolated enum ChannelViewingOutboxEntryStatus: String, Codable, Equatable, Sendable {
     case pending
     case retrying
     case terminallyRejected
 }
 
-struct ChannelViewingOutboxEntry: Codable, Equatable, Sendable {
+nonisolated struct ChannelViewingOutboxEntry: Codable, Equatable, Sendable {
     let segment: ChannelViewingSegment
     var status: ChannelViewingOutboxEntryStatus
     var deliveryAttempts: Int
 }
 
-enum ChannelViewingOutboxAttemptResult: Equatable, Sendable {
+nonisolated enum ChannelViewingOutboxAttemptResult: Equatable, Sendable {
     case empty
     case acknowledged(segmentId: UUID, outcome: ChannelViewingDeliveryOutcome)
     case retained(segmentId: UUID, outcome: ChannelViewingDeliveryOutcome)
@@ -458,5 +458,342 @@ actor ActiveChannelViewingAccumulator {
             throw ChannelViewingAccumulatorError.monotonicClockMovedBackward
         }
         return Int((now - start).rounded(.down))
+    }
+}
+
+nonisolated protocol ChannelViewingHTTPClient: Sendable {
+    func data(for request: URLRequest) async throws -> (Data, URLResponse)
+}
+
+nonisolated struct URLSessionChannelViewingHTTPClient: ChannelViewingHTTPClient {
+    let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await session.data(for: request)
+    }
+}
+
+nonisolated struct MattoneChannelViewingTransport: ChannelViewingTransport {
+    static let productionEndpoint = URL(
+        string: "https://api.celesti.gaulatti.com/channel-viewing/segments"
+    )!
+
+    private struct ResponseBody: Decodable {
+        let status: String
+    }
+
+    let endpoint: URL
+    let deviceID: String
+    let client: any ChannelViewingHTTPClient
+
+    init(
+        endpoint: URL = Self.productionEndpoint,
+        deviceID: String,
+        client: any ChannelViewingHTTPClient = URLSessionChannelViewingHTTPClient()
+    ) {
+        self.endpoint = endpoint
+        self.deviceID = deviceID
+        self.client = client
+    }
+
+    func deliver(_ segment: ChannelViewingSegment) async -> ChannelViewingDeliveryOutcome {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(deviceID, forHTTPHeaderField: "X-Device-ID")
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        do {
+            request.httpBody = try encoder.encode(segment)
+            let (data, response) = try await client.data(for: request)
+            guard let response = response as? HTTPURLResponse else {
+                return .retryableFailure
+            }
+
+            if (200...299).contains(response.statusCode) {
+                guard let payload = try? JSONDecoder().decode(ResponseBody.self, from: data) else {
+                    return .retryableFailure
+                }
+                switch payload.status {
+                case "recorded": return .recorded
+                case "duplicate": return .duplicate
+                default: return .retryableFailure
+                }
+            }
+
+            if response.statusCode == 408
+                || response.statusCode == 425
+                || response.statusCode == 429
+                || (500...599).contains(response.statusCode) {
+                return .retryableFailure
+            }
+            return .terminalRejection
+        } catch {
+            return .retryableFailure
+        }
+    }
+}
+
+nonisolated enum ChannelViewingPlaybackSource: Equatable, Sendable {
+    case onDevice
+    case remoteCommand
+}
+
+nonisolated enum ChannelViewingPlaybackState: Equatable, Sendable {
+    case starting
+    case buffering
+    case playing
+    case paused
+    case failed
+    case stopped
+}
+
+nonisolated struct ChannelViewingPlaybackEvent: Equatable, Sendable {
+    let source: ChannelViewingPlaybackSource
+    let channelID: String
+    let state: ChannelViewingPlaybackState
+}
+
+nonisolated enum ChannelViewingDiagnostic: Equatable, Sendable {
+    case delivered(ChannelViewingDeliveryOutcome)
+    case retryScheduled(attempt: Int, delaySeconds: Int)
+    case terminalRejection
+    case persistenceFailure
+}
+
+nonisolated struct ChannelViewingRetrySchedule: Equatable, Sendable {
+    static let maximumDelaySeconds = 30
+
+    private(set) var attempt = 0
+
+    mutating func nextDelaySeconds() -> Int {
+        attempt += 1
+        return min(1 << min(attempt - 1, 5), Self.maximumDelaySeconds)
+    }
+
+    mutating func reset() {
+        attempt = 0
+    }
+}
+
+actor ChannelViewingHistoryController {
+    typealias DiagnosticHandler = @Sendable (ChannelViewingDiagnostic) -> Void
+
+    private let accumulator: ActiveChannelViewingAccumulator
+    private let outbox: DurableChannelViewingOutbox
+    private let transport: any ChannelViewingTransport
+    private let diagnosticHandler: DiagnosticHandler
+    private let automaticTasks: Bool
+    private var applicationIsActive = true
+    private var registrationIsAvailable = false
+    private var networkIsAvailable = false
+    private var currentSource: ChannelViewingPlaybackSource?
+    private var latestEvent: ChannelViewingPlaybackEvent?
+    private var checkpointTask: Task<Void, Never>?
+    private var deliveryTask: Task<Void, Never>?
+    private var drainRequested = false
+
+    init(
+        accumulator: ActiveChannelViewingAccumulator,
+        outbox: DurableChannelViewingOutbox,
+        transport: any ChannelViewingTransport,
+        automaticTasks: Bool = true,
+        diagnosticHandler: @escaping DiagnosticHandler = { _ in }
+    ) {
+        self.accumulator = accumulator
+        self.outbox = outbox
+        self.transport = transport
+        self.automaticTasks = automaticTasks
+        self.diagnosticHandler = diagnosticHandler
+    }
+
+    func receive(_ event: ChannelViewingPlaybackEvent) async {
+        if let currentSource, currentSource != event.source {
+            return
+        }
+        if currentSource == nil {
+            guard event.state != .stopped, event.state != .failed else { return }
+            currentSource = event.source
+        }
+        latestEvent = event
+
+        await applyEffectiveActivity()
+        if event.state == .stopped, currentSource == event.source {
+            currentSource = nil
+            latestEvent = nil
+        }
+    }
+
+    func setApplicationActive(_ isActive: Bool) async {
+        guard applicationIsActive != isActive else {
+            if isActive { requestDrain() }
+            return
+        }
+        applicationIsActive = isActive
+        await applyEffectiveActivity()
+        if isActive { requestDrain() }
+    }
+
+    func setRegistrationAvailable(_ isAvailable: Bool) {
+        registrationIsAvailable = isAvailable
+        if isAvailable {
+            requestDrain()
+        } else {
+            deliveryTask?.cancel()
+            drainRequested = false
+        }
+    }
+
+    func setNetworkAvailable(_ isAvailable: Bool) {
+        networkIsAvailable = isAvailable
+        if isAvailable {
+            requestDrain()
+        } else {
+            deliveryTask?.cancel()
+            drainRequested = false
+        }
+    }
+
+    func checkpointNow() async {
+        guard applicationIsActive, latestEvent?.state == .playing else { return }
+        do {
+            try await accumulator.checkpoint()
+            requestDrain()
+        } catch {
+            checkpointTask?.cancel()
+            checkpointTask = nil
+            diagnosticHandler(.persistenceFailure)
+        }
+    }
+
+    func drainAvailableSegmentsNow() async {
+        await drainAvailableSegments(retries: false)
+    }
+
+    private func applyEffectiveActivity() async {
+        let activity: ChannelPlaybackActivity
+        if !applicationIsActive {
+            activity = .inactive
+        } else if let latestEvent {
+            switch latestEvent.state {
+            case .playing:
+                activity = .playing(channelId: latestEvent.channelID)
+            case .starting, .buffering:
+                activity = .buffering
+            case .paused:
+                activity = .paused
+            case .failed:
+                activity = .failed
+            case .stopped:
+                activity = .stopped
+            }
+        } else {
+            activity = .stopped
+        }
+
+        do {
+            try await accumulator.transition(to: activity)
+            configureCheckpoint(for: activity)
+            requestDrain()
+        } catch {
+            checkpointTask?.cancel()
+            checkpointTask = nil
+            diagnosticHandler(.persistenceFailure)
+        }
+    }
+
+    private func configureCheckpoint(for activity: ChannelPlaybackActivity) {
+        checkpointTask?.cancel()
+        checkpointTask = nil
+        guard automaticTasks, case .playing = activity else { return }
+        checkpointTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+            } catch {
+                return
+            }
+            await self?.checkpointDeadlineReached()
+        }
+    }
+
+    private func checkpointDeadlineReached() async {
+        checkpointTask = nil
+        guard applicationIsActive, latestEvent?.state == .playing else { return }
+        await checkpointNow()
+        if checkpointTask == nil,
+           applicationIsActive,
+           latestEvent?.state == .playing {
+            configureCheckpoint(for: .playing(channelId: latestEvent?.channelID ?? ""))
+        }
+    }
+
+    private func requestDrain() {
+        guard automaticTasks,
+              registrationIsAvailable,
+              networkIsAvailable else { return }
+        guard deliveryTask == nil else {
+            drainRequested = true
+            return
+        }
+        drainRequested = false
+        deliveryTask = Task { [weak self] in
+            await self?.drainAvailableSegments(retries: true)
+        }
+    }
+
+    private func drainAvailableSegments(retries: Bool) async {
+        var schedule = ChannelViewingRetrySchedule()
+        while !Task.isCancelled {
+            if retries, (!registrationIsAvailable || !networkIsAvailable) { break }
+            let result: ChannelViewingOutboxAttemptResult
+            do {
+                result = try await outbox.deliverNext(using: transport)
+            } catch {
+                diagnosticHandler(.persistenceFailure)
+                break
+            }
+
+            switch result {
+            case .empty:
+                finishDeliveryTask()
+                return
+            case let .acknowledged(_, outcome):
+                diagnosticHandler(.delivered(outcome))
+                schedule.reset()
+            case let .retained(_, outcome):
+                switch outcome {
+                case .terminalRejection:
+                    diagnosticHandler(.terminalRejection)
+                case .retryableFailure:
+                    guard retries else {
+                        finishDeliveryTask()
+                        return
+                    }
+                    let delay = schedule.nextDelaySeconds()
+                    diagnosticHandler(.retryScheduled(attempt: schedule.attempt, delaySeconds: delay))
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+                    } catch {
+                        finishDeliveryTask()
+                        return
+                    }
+                case .recorded, .duplicate:
+                    break
+                }
+            }
+        }
+        finishDeliveryTask()
+    }
+
+    private func finishDeliveryTask() {
+        deliveryTask = nil
+        guard drainRequested else { return }
+        drainRequested = false
+        requestDrain()
     }
 }

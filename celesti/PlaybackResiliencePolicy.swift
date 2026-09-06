@@ -93,6 +93,31 @@ enum PlaybackRecoveryPolicy {
     }
 }
 
+struct PlaybackRequestArbiter {
+    struct Request: Equatable, Sendable {
+        fileprivate let generation: UInt64
+    }
+
+    private var generation: UInt64 = 0
+
+    mutating func begin() -> Request {
+        generation &+= 1
+        return Request(generation: generation)
+    }
+
+    mutating func invalidate() {
+        generation &+= 1
+    }
+
+    func currentRequest() -> Request {
+        Request(generation: generation)
+    }
+
+    func accepts(_ request: Request) -> Bool {
+        request.generation == generation
+    }
+}
+
 enum EmergencyCarouselPolicy {
     static func healthySlots(assignedSlots: [Int], offlineSlots: Set<Int>) -> [Int] {
         assignedSlots.filter { !offlineSlots.contains($0) }

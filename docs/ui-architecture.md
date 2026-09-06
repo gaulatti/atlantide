@@ -41,35 +41,45 @@ remote actions. New visual primitives must be added to Sabella with a catalog
 fixture before Atlantide consumes them; do not add local fonts, colors, view
 modifiers, component styling, or brand artwork here.
 
-## Channel viewing history foundation
+## Channel viewing history
 
-`ActiveChannelViewingAccumulator` is a pure, unwired timing state machine for a
-future live-player adapter. It counts only monotonic time spent continuously in
-`playing` for one authoritative channel ID. Buffering, pause, app inactivity,
-failure, stop, and channel changes close the active interval without counting
-their elapsed time. Wall-clock values only anchor the segment timestamps, so a
-wall-clock adjustment cannot change `activeSeconds`.
+`ChannelViewingHistoryController` is the one attribution boundary for eligible
+single-channel playback. The on-device browser passes Sabella's semantic
+`SabellaTVPlaybackActivity` callback into it. The legacy single-player
+controller reports the same product states only when a remote command includes
+an authoritative channel UUID. A per-request generation guard prevents an older
+asynchronous stream resolution from replacing newer media and attributing it to
+the newer channel. Demo, quad, emergency, guide focus, and preview paths never
+enter the controller.
 
-The adapter must call `checkpoint()` no later than each 60-second boundary
-while playback remains active. Each successful checkpoint first atomically
-persists one or more segments of at most 60 seconds to
-`DurableChannelViewingOutbox`; the remaining unpersisted whole and fractional
-interval is then strictly less than 60 seconds. A non-playing transition flushes
-the whole-second remainder and discards only sub-second residue. If persistence
-fails or the bounded outbox is full, the transition fails without advancing the
-checkpoint, so the adapter must surface the failure and stop claiming that
-viewing history is current.
+Only engine-confirmed advancing media in an active application counts. Starting,
+buffering, pause, app inactivity or background, recovery delay, failure, stop,
+and channel changes close the current interval immediately. Foreground radio can
+therefore count, while background radio cannot. A source switch claims the
+tracker before the new stream can become active, and every late callback from
+the replaced source is ignored. The accumulator uses monotonic time for duration;
+wall time only anchors the API timestamps.
 
-The outbox stores a deterministic JSON document with schema version `1` and
-retains the original client-generated `segmentId` across retries and relaunches.
-It removes a segment only after `recorded` or `duplicate`. A retryable failure
-remains eligible for delivery; a terminal rejection remains durable and visible
-but is skipped by automatic delivery. Corrupt or unknown persisted schemas fail
-closed instead of being overwritten. `FileChannelViewingOutboxPersistence`
-uses an atomic local file write, while tests inject an in-memory store.
+While playback remains active, a task checkpoints no later than every 60
+seconds. Each successful checkpoint first atomically persists segments of at
+most 60 seconds to `DurableChannelViewingOutbox`; a stopping transition flushes
+the whole-second remainder and discards only sub-second residue. The production
+outbox is `channel-viewing-outbox.json` under Celesti's Application Support
+directory. It uses schema version `1`, a 1,000-segment bound, atomic file writes,
+and stable client-generated `segmentId` values across retries and relaunches.
+Corrupt or future schemas fail closed instead of being overwritten.
 
-No player event adapter, Mattone endpoint, transport implementation, production
-telemetry, or user-visible surface is wired in this foundation. The later
-integration issue owns mapping real Sabella playback transitions, scheduling
-the checkpoint deadline, selecting the app-support file URL, and delivering the
-landed segment contract to Mattone.
+`MattoneChannelViewingTransport` posts the exact landed DTO to
+`https://api.celesti.gaulatti.com/channel-viewing/segments` with the registered
+`X-Device-ID`. The outbox starts draining after device registration, when the
+network becomes available, on app activation, and after enqueue. `recorded` and
+`duplicate` are terminal success. Network errors, HTTP 408/425/429, and 5xx
+responses retain the segment and retry with bounded 1, 2, 4, 8, 16, then
+30-second delays. Other HTTP rejections remain durable and are skipped so one
+foreign or invalid channel cannot block unrelated segments.
+
+Viewing delivery is separate from playback reliability telemetry. Protected
+unified logs expose only bounded results (`recorded`, `duplicate`, `retry`,
+`terminal_rejection`, or persistence failure) and retry timing. They never log
+device, channel, segment, URL, timestamp, or payload values. Mattone owns the
+server-side viewing counter and database aggregate.
