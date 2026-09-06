@@ -14,12 +14,10 @@ let package = Package(
             exclude: [
                 "Assets.xcassets",
                 "CelestiStore.swift",
-                "CelestiTheme.swift",
                 "ContentView.swift",
                 "DvrViews.swift",
                 "EmergencyPlaybackView.swift",
                 "EmergencyPlayerController.swift",
-                "Fonts",
                 "KSPlayerWorkaround.m",
                 "QuadPlaybackView.swift",
                 "QuadPlayerController.swift",
