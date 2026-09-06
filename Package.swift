@@ -25,7 +25,10 @@ let package = Package(
                 "TelemetryReporter.swift",
                 "celestiApp.swift",
             ],
-            sources: ["PlaybackResiliencePolicy.swift"]
+            sources: [
+                "ChannelViewingHistory.swift",
+                "PlaybackResiliencePolicy.swift",
+            ]
         ),
         .testTarget(
             name: "AtlantideResilienceTests",
