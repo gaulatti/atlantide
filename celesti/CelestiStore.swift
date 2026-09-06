@@ -75,6 +75,13 @@ final class CelestiAppModel: ObservableObject {
     @Published var nickname: String?
     @Published var playback: PlaybackPresentation?
     @Published var callsign: CallsignPresentation?
+    @Published private(set) var channelGroups: [CelestiChannelGroupSummary] = []
+    @Published private(set) var channelGroupsLoading = false
+    @Published private(set) var channelGroupsError: String?
+    @Published var activeChannelGroup: CelestiChannelGroup?
+    @Published var selectedChannelID: String?
+    @Published var channelGuideVisible = false
+    @Published private(set) var channelGuideLoadingMore = false
 
     let deviceId: String
     let playerController: PlayerController
@@ -84,8 +91,11 @@ final class CelestiAppModel: ObservableObject {
     @Published var layoutMode: LayoutMode = .single
 
     private let registrationService = RegistrationService()
+    private let channelLibraryService = ChannelLibraryService()
     private let commandStream = CommandStreamClient()
     private var registrationTask: Task<Void, Never>?
+    private var activeChannelGroupSummary: CelestiChannelGroupSummary?
+    private var activeChannelGroupPage = 0
     private var started = false
 
     init() {
@@ -151,6 +161,96 @@ final class CelestiAppModel: ObservableObject {
         quadPlayerController.stopAll()
         emergencyPlayerController.stopAll()
         layoutMode = .single
+        activeChannelGroup = nil
+        activeChannelGroupSummary = nil
+        activeChannelGroupPage = 0
+        selectedChannelID = nil
+        channelGuideVisible = false
+        channelGuideLoadingMore = false
+    }
+
+    func refreshChannelGroups() async {
+        channelGroupsLoading = true
+        channelGroupsError = nil
+        do {
+            channelGroups = try await channelLibraryService.groupSummaries(deviceID: deviceId)
+        } catch {
+            channelGroups = []
+            channelGroupsError = error.localizedDescription
+        }
+        channelGroupsLoading = false
+    }
+
+    func selectChannelGroup(_ summary: CelestiChannelGroupSummary) async {
+        guard summary.channelCount > 0 else { return }
+        channelGroupsLoading = true
+        channelGroupsError = nil
+        do {
+            let group = try await channelLibraryService.channels(
+                deviceID: deviceId,
+                group: summary,
+                page: 1
+            )
+            guard let first = group.channels.first else { throw URLError(.zeroByteResource) }
+            playerController.stop()
+            activeChannelGroupSummary = summary
+            activeChannelGroupPage = 1
+            activeChannelGroup = group
+            channelGuideVisible = true
+            selectLiveChannel(first)
+        } catch {
+            channelGroupsError = error.localizedDescription
+        }
+        channelGroupsLoading = false
+    }
+
+    func selectLiveChannel(_ channel: CelestiChannel) {
+        selectedChannelID = channel.id
+        TelemetryReporter.shared.setActiveChannel(channel.id)
+    }
+
+    func leaveChannelGroupPlayback() {
+        playerController.stop()
+        activeChannelGroup = nil
+        activeChannelGroupSummary = nil
+        activeChannelGroupPage = 0
+        selectedChannelID = nil
+        channelGuideVisible = false
+        channelGuideLoadingMore = false
+    }
+
+    func loadMoreChannelsIfNeeded() {
+        guard !channelGuideLoadingMore,
+              let summary = activeChannelGroupSummary,
+              let group = activeChannelGroup,
+              group.channels.count < group.total else { return }
+
+        channelGuideLoadingMore = true
+        let nextPage = activeChannelGroupPage + 1
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.channelGuideLoadingMore = false }
+            do {
+                let next = try await self.channelLibraryService.channels(
+                    deviceID: self.deviceId,
+                    group: summary,
+                    page: nextPage
+                )
+                guard self.activeChannelGroupSummary?.id == summary.id,
+                      let current = self.activeChannelGroup else { return }
+                let known = Set(current.channels.map(\.id))
+                let newChannels = next.channels.filter { !known.contains($0.id) }
+                self.activeChannelGroup = CelestiChannelGroup(
+                    id: current.id,
+                    name: current.name,
+                    channels: current.channels + newChannels,
+                    total: next.total
+                )
+                self.activeChannelGroupPage = nextPage
+            } catch {
+                log.error("Could not load the next channel page: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     func togglePlayPause() {
@@ -205,6 +305,26 @@ final class CelestiAppModel: ObservableObject {
         playerController.retryFromFailure()
     }
 
+    func restartApplication() {
+        log.log("Restart application command received; resetting app lifecycle")
+        registrationTask?.cancel()
+        registrationTask = nil
+        commandStream.disconnect()
+        dvrAutoHideTask?.cancel()
+        dvrAutoHideTask = nil
+        callsign = nil
+        nickname = nil
+        dvrVisible = false
+        dvrAction = .none
+        playerController.stop()
+        quadPlayerController.stopAll()
+        emergencyPlayerController.stopAll()
+        layoutMode = .single
+        registrationState = .pending
+        started = false
+        startIfNeeded()
+    }
+
     func restartPlayback() {
         if layoutMode == .emergency {
             emergencyPlayerController.restartFocused()
@@ -240,6 +360,7 @@ final class CelestiAppModel: ObservableObject {
                     if result.isRegistered {
                         self.nickname = result.nickname
                         self.registrationState = .standby
+                        await self.refreshChannelGroups()
                         log.log("Device registered! Starting command stream")
                         self.startCommandStream()
                         return
@@ -266,6 +387,10 @@ final class CelestiAppModel: ObservableObject {
         log.log("Received command: type=\(command.type, privacy: .public) videoId=\(command.videoId ?? "nil", privacy: .public) url=\(command.url ?? "nil", privacy: .public) name=\(command.name ?? command.title ?? "nil", privacy: .public)")
         switch command.type {
         case "youtube":
+            activeChannelGroup = nil
+            activeChannelGroupSummary = nil
+            activeChannelGroupPage = 0
+            channelGuideVisible = false
             guard let videoId = command.videoId, !videoId.isEmpty else {
                 log.error("youtube command missing videoId")
                 return
@@ -273,6 +398,10 @@ final class CelestiAppModel: ObservableObject {
             log.log("Opening YouTube videoId: \(videoId, privacy: .public)")
             playerController.openYouTube(videoId: videoId)
         case "m3u", "dash":
+            activeChannelGroup = nil
+            activeChannelGroupSummary = nil
+            activeChannelGroupPage = 0
+            channelGuideVisible = false
             guard let url = command.url, !url.isEmpty else {
                 log.error("\(command.type, privacy: .public) command missing url")
                 return
@@ -359,7 +488,15 @@ final class CelestiAppModel: ObservableObject {
         case "reboot":
             // tvOS does not expose an API that lets a third-party app reboot the device.
             log.warning("Reboot command ignored: unavailable to tvOS applications")
+        case "restart_app":
+            // tvOS cannot terminate and relaunch a third-party app. Reset every
+            // app-owned lifecycle resource and reconnect from registration instead.
+            restartApplication()
         case "layout":
+            activeChannelGroup = nil
+            activeChannelGroupSummary = nil
+            activeChannelGroupPage = 0
+            channelGuideVisible = false
             let newMode = LayoutMode.from(command.mode)
             log.log("Layout command received: \(newMode.rawValue, privacy: .public)")
             layoutMode = newMode
@@ -374,6 +511,10 @@ final class CelestiAppModel: ObservableObject {
                 emergencyPlayerController.stopAll()
             }
         case "quad":
+            activeChannelGroup = nil
+            activeChannelGroupSummary = nil
+            activeChannelGroupPage = 0
+            channelGuideVisible = false
             guard let url = command.url, !url.isEmpty, let quadrant = Quadrant.from(command.quadrant) else {
                 log.error("quad command missing url or valid quadrant")
                 return

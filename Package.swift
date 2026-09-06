@@ -13,6 +13,7 @@ let package = Package(
             path: "celesti",
             exclude: [
                 "Assets.xcassets",
+                "ChannelLibrary.swift",
                 "CelestiStore.swift",
                 "ContentView.swift",
                 "DvrViews.swift",
