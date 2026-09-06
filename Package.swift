@@ -19,7 +19,6 @@ let package = Package(
                 "DvrViews.swift",
                 "EmergencyPlaybackView.swift",
                 "EmergencyPlayerController.swift",
-                "KSPlayerWorkaround.m",
                 "QuadPlaybackView.swift",
                 "QuadPlayerController.swift",
                 "Quadrant.swift",

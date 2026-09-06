@@ -2,8 +2,8 @@ import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
-import KSPlayer
 import OSLog
+import Sabella
 import SwiftUI
 import UIKit
 import Combine
@@ -78,6 +78,8 @@ final class CelestiAppModel: ObservableObject {
     @Published private(set) var channelGroups: [CelestiChannelGroupSummary] = []
     @Published private(set) var channelGroupsLoading = false
     @Published private(set) var channelGroupsError: String?
+    @Published var channelBrowserPage: SabellaTVChannelBrowserPage = .home
+    @Published var focusedChannelGroupID: String?
     @Published var activeChannelGroup: CelestiChannelGroup?
     @Published var selectedChannelID: String?
     @Published var channelGuideVisible = false
@@ -174,6 +176,10 @@ final class CelestiAppModel: ObservableObject {
         channelGroupsError = nil
         do {
             channelGroups = try await channelLibraryService.groupSummaries(deviceID: deviceId)
+            if let focusedChannelGroupID,
+               !channelGroups.contains(where: { $0.id == focusedChannelGroupID }) {
+                self.focusedChannelGroupID = nil
+            }
         } catch {
             channelGroups = []
             channelGroupsError = error.localizedDescription
@@ -183,6 +189,7 @@ final class CelestiAppModel: ObservableObject {
 
     func selectChannelGroup(_ summary: CelestiChannelGroupSummary) async {
         guard summary.channelCount > 0 else { return }
+        focusedChannelGroupID = summary.id
         channelGroupsLoading = true
         channelGroupsError = nil
         do {

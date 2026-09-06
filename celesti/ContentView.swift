@@ -1,6 +1,5 @@
 import AVKit
 import Combine
-import KSPlayer
 import Sabella
 import SwiftUI
 
@@ -65,7 +64,23 @@ struct ContentView: View {
         SabellaTVChannelHome(
             productName: "Celesti",
             state: channelHomeState,
-            retry: { Task { await appModel.refreshChannelGroups() } }
+            page: $appModel.channelBrowserPage,
+            focusedGroupID: $appModel.focusedChannelGroupID,
+            userName: appModel.nickname,
+            userDetail: "Registered television · \(appModel.deviceId)",
+            userActions: [
+                SabellaTVUserAction(
+                    id: "refresh-channels",
+                    title: "Refresh channel library",
+                    subtitle: "Reload groups and channel availability from Celesti.",
+                    systemImage: "arrow.clockwise"
+                ),
+            ],
+            retry: { Task { await appModel.refreshChannelGroups() } },
+            selectUserAction: { action in
+                guard action.id == "refresh-channels" else { return }
+                Task { await appModel.refreshChannelGroups() }
+            }
         ) { selected in
             guard let group = appModel.channelGroups.first(where: { $0.id == selected.id }) else { return }
             Task { await appModel.selectChannelGroup(group) }

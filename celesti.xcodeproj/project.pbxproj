@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		7B28D026053919D315B91FA8 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = 031A30E4F9EB039BEEE81793 /* KSPlayer */; };
 		A7B1C2D3E4F5061728394051 /* Sabella in Frameworks */ = {isa = PBXBuildFile; productRef = A7B1C2D3E4F5061728394052 /* Sabella */; };
 /* End PBXBuildFile section */
 
@@ -28,7 +27,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				7B28D026053919D315B91FA8 /* KSPlayer in Frameworks */,
 				A7B1C2D3E4F5061728394051 /* Sabella in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -73,7 +71,6 @@
 			);
 			name = celesti;
 			packageProductDependencies = (
-				031A30E4F9EB039BEEE81793 /* KSPlayer */,
 				A7B1C2D3E4F5061728394052 /* Sabella */,
 			);
 			productName = celesti;
@@ -105,7 +102,6 @@
 			mainGroup = 71E4254A2F847C57003848A2;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A3859BE35604EA99218367C4 /* XCRemoteSwiftPackageReference "KSPlayer" */,
 				A7B1C2D3E4F5061728394053 /* XCLocalSwiftPackageReference "../../sabella" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -374,23 +370,7 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		A3859BE35604EA99218367C4 /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
 /* Begin XCSwiftPackageProductDependency section */
-		031A30E4F9EB039BEEE81793 /* KSPlayer */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A3859BE35604EA99218367C4 /* XCRemoteSwiftPackageReference "KSPlayer" */;
-			productName = KSPlayer;
-		};
 		A7B1C2D3E4F5061728394052 /* Sabella */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A7B1C2D3E4F5061728394053 /* XCLocalSwiftPackageReference "../../sabella" */;
