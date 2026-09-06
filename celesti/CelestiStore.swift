@@ -80,7 +80,19 @@ final class CelestiAppModel: ObservableObject {
     @Published private(set) var channelGroupsError: String?
     @Published var channelBrowserPage: SabellaTVChannelBrowserPage = .home
     @Published var focusedChannelGroupID: String?
-    @Published var activeChannelGroup: CelestiChannelGroup?
+    @Published var activeChannelGroup: CelestiChannelGroup? {
+        didSet {
+            if oldValue != nil, activeChannelGroup == nil, let selectedChannelID {
+                channelViewingRuntime?.receive(
+                    ChannelViewingPlaybackEvent(
+                        source: .onDevice,
+                        channelID: selectedChannelID,
+                        state: .stopped
+                    )
+                )
+            }
+        }
+    }
     @Published var selectedChannelID: String?
     @Published var channelGuideVisible = false
     @Published private(set) var channelGuideLoadingMore = false
@@ -89,6 +101,7 @@ final class CelestiAppModel: ObservableObject {
     let playerController: PlayerController
     let quadPlayerController: QuadPlayerController
     let emergencyPlayerController: EmergencyPlayerController
+    private let channelViewingRuntime: ChannelViewingRuntime?
 
     @Published var layoutMode: LayoutMode = .single
 
@@ -106,8 +119,17 @@ final class CelestiAppModel: ObservableObject {
         self.playerController = PlayerController()
         self.quadPlayerController = QuadPlayerController()
         self.emergencyPlayerController = EmergencyPlayerController()
+        do {
+            self.channelViewingRuntime = try ChannelViewingRuntime(deviceID: self.deviceId)
+        } catch {
+            self.channelViewingRuntime = nil
+            log.fault("Viewing history initialization failed; persistence is unavailable")
+        }
         self.playerController.onPresentationChanged = { [weak self] presentation in
             self?.playback = presentation
+        }
+        self.playerController.onChannelViewingPlaybackChanged = { [weak self] event in
+            self?.channelViewingRuntime?.receive(event)
         }
         self.playerController.onDvrStateChanged = { [weak self] dvrAction in
             guard let self else { return }
@@ -214,6 +236,28 @@ final class CelestiAppModel: ObservableObject {
     func selectLiveChannel(_ channel: CelestiChannel) {
         selectedChannelID = channel.id
         TelemetryReporter.shared.setActiveChannel(channel.id)
+    }
+
+    func handleLiveChannelPlaybackActivity(_ activity: SabellaTVPlaybackActivity) {
+        let state: ChannelViewingPlaybackState = switch activity.state {
+        case .starting: .starting
+        case .buffering: .buffering
+        case .playing: .playing
+        case .paused: .paused
+        case .failed: .failed
+        case .stopped: .stopped
+        }
+        channelViewingRuntime?.receive(
+            ChannelViewingPlaybackEvent(
+                source: .onDevice,
+                channelID: activity.channelID,
+                state: state
+            )
+        )
+    }
+
+    func handleScenePhase(_ phase: ScenePhase) {
+        channelViewingRuntime?.setApplicationActive(phase == .active)
     }
 
     func leaveChannelGroupPlayback() {
@@ -367,6 +411,7 @@ final class CelestiAppModel: ObservableObject {
                     if result.isRegistered {
                         self.nickname = result.nickname
                         self.registrationState = .standby
+                        self.channelViewingRuntime?.registrationBecameAvailable()
                         await self.refreshChannelGroups()
                         log.log("Device registered! Starting command stream")
                         self.startCommandStream()
@@ -449,7 +494,11 @@ final class CelestiAppModel: ObservableObject {
                 layoutMode = .single
                 quadPlayerController.stopAll()
                 emergencyPlayerController.stopAll()
-                await playerController.playStream(urlString: url, radioName: command.name ?? command.title)
+                await playerController.playStream(
+                    urlString: url,
+                    radioName: command.name ?? command.title,
+                    channelID: command.channelId
+                )
             }
         case "stop":
             if let position = command.quadrant,
@@ -728,10 +777,12 @@ final class PlayerController: NSObject, ObservableObject {
     @Published var isUsingKSPlayer = false
     var onPresentationChanged: ((PlaybackPresentation?) -> Void)?
     var onDvrStateChanged: ((DvrAction?) -> Void)?
+    var onChannelViewingPlaybackChanged: ((ChannelViewingPlaybackEvent) -> Void)?
 
     private var currentPresentation: PlaybackPresentation? {
         didSet {
             onPresentationChanged?(currentPresentation)
+            publishDerivedChannelViewingActivity()
         }
     }
 
@@ -740,6 +791,9 @@ final class PlayerController: NSObject, ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var errorObserver: NSObjectProtocol?
     private var currentSource: PlaybackSource?
+    private var currentChannelID: String?
+    private var lastChannelViewingEvent: ChannelViewingPlaybackEvent?
+    private var playbackRequestArbiter = PlaybackRequestArbiter()
     private var currentRadioName: String?
     var currentURL: URL?
     private var originalURL: URL?
@@ -807,16 +861,23 @@ final class PlayerController: NSObject, ObservableObject {
             return
         }
         playerLog.log("playDemo: selected URL \(selected, privacy: .public)")
-        await play(urlString: selected, radioName: nil, source: .demo)
+        await play(urlString: selected, radioName: nil, source: .demo, channelID: nil)
     }
 
-    func playStream(urlString: String, radioName: String?) async {
+    func playStream(urlString: String, radioName: String?, channelID: String?) async {
         playerLog.log("playStream called: url=\(urlString, privacy: .public) name=\(radioName ?? "nil", privacy: .public)")
-        await play(urlString: urlString, radioName: radioName, source: .remoteCommand)
+        await play(
+            urlString: urlString,
+            radioName: radioName,
+            source: .remoteCommand,
+            channelID: channelID
+        )
     }
 
     func stop() {
         playerLog.log("stop called")
+        playbackRequestArbiter.invalidate()
+        publishChannelViewingActivity(.stopped)
         let stoppedStreamName = currentRadioName
         let hadPlayback = currentSource != nil || player.currentItem != nil || isUsingKSPlayer
         stopWatchdog()
@@ -847,6 +908,8 @@ final class PlayerController: NSObject, ObservableObject {
         player.replaceCurrentItem(with: nil)
         isUsingKSPlayer = false
         currentSource = nil
+        currentChannelID = nil
+        lastChannelViewingEvent = nil
         currentRadioName = nil
         currentURL = nil
         originalURL = nil
@@ -905,8 +968,10 @@ final class PlayerController: NSObject, ObservableObject {
         if isUsingKSPlayer {
             if ksCoordinator?.state.isPlaying == true {
                 ksCoordinator?.playerLayer?.pause()
+                publishChannelViewingActivity(.paused)
             } else {
                 ksCoordinator?.playerLayer?.play()
+                publishChannelViewingActivity(.buffering)
             }
             return
         }
@@ -914,8 +979,10 @@ final class PlayerController: NSObject, ObservableObject {
         playerLog.log("togglePlayPause: wasPaused=\(wasPaused)")
         if wasPaused {
             player.play()
+            publishChannelViewingActivity(.buffering)
         } else {
             player.pause()
+            publishChannelViewingActivity(.paused)
         }
     }
 
@@ -923,7 +990,19 @@ final class PlayerController: NSObject, ObservableObject {
         guard let url = originalURL else { return }
         let name = currentRadioName
         let source = currentSource ?? .remoteCommand
-        Task { await play(urlString: url.absoluteString, radioName: name, source: source) }
+        let channelID = currentChannelID
+        let currentRequest = playbackRequestArbiter.currentRequest()
+        Task { [weak self] in
+            guard !Task.isCancelled,
+                  let self,
+                  self.playbackRequestArbiter.accepts(currentRequest) else { return }
+            await self.play(
+                urlString: url.absoluteString,
+                radioName: name,
+                source: source,
+                channelID: channelID
+            )
+        }
     }
 
     func adjustVolume(by percent: Int) {
@@ -970,14 +1049,32 @@ final class PlayerController: NSObject, ObservableObject {
         lastPlaybackPosition = .zero
         lastPositionUpdateAt = .distantPast
 
-        Task {
-            let name = currentRadioName
-            let source = currentSource ?? .remoteCommand
-            await play(urlString: url.absoluteString, radioName: name, source: source)
+        let currentRequest = playbackRequestArbiter.currentRequest()
+        Task { [weak self] in
+            guard !Task.isCancelled,
+                  let self,
+                  self.playbackRequestArbiter.accepts(currentRequest) else { return }
+            let name = self.currentRadioName
+            let source = self.currentSource ?? .remoteCommand
+            let channelID = self.currentChannelID
+            await self.play(
+                urlString: url.absoluteString,
+                radioName: name,
+                source: source,
+                channelID: channelID
+            )
         }
     }
 
-    private func play(urlString: String, radioName: String?, source: PlaybackSource) async {
+    private func play(
+        urlString: String,
+        radioName: String?,
+        source: PlaybackSource,
+        channelID: String?,
+        restoringRecoveryAttempt: Int? = nil,
+        restoringOfflineProbeCount: Int? = nil
+    ) async {
+        guard !Task.isCancelled else { return }
         guard let inputURL = URL(string: urlString) else {
             playerLog.error("play: invalid URL string: \(urlString, privacy: .public)")
             return
@@ -985,9 +1082,11 @@ final class PlayerController: NSObject, ObservableObject {
 
         playerLog.log("play: url=\(urlString, privacy: .public) name=\(radioName ?? "nil", privacy: .public) source=\(source == .demo ? "demo" : "remote")")
         stop()
+        let playbackRequest = playbackRequestArbiter.begin()
         audioFallbackApplied = false
         originalURL = inputURL
         currentSource = source
+        currentChannelID = channelID
         currentRadioName = radioName
         qualityTier = 3
         lastTierChangeAt = Date()
@@ -1003,6 +1102,16 @@ final class PlayerController: NSObject, ObservableObject {
 
         playerLog.log("play: resolving stream URL")
         let resolved = await StreamResolver().resolve(url: inputURL)
+        guard !Task.isCancelled, playbackRequestArbiter.accepts(playbackRequest) else {
+            playerLog.log("play: discarded superseded stream resolution")
+            return
+        }
+        if let restoringRecoveryAttempt {
+            recoveryAttempt = restoringRecoveryAttempt
+        }
+        if let restoringOfflineProbeCount {
+            offlineProbeCount = restoringOfflineProbeCount
+        }
         currentURL = resolved.url
         playerLog.log("play: resolved URL: \(resolved.url.absoluteString, privacy: .public) headers: \(resolved.headers, privacy: .public)")
 
@@ -1403,6 +1512,49 @@ final class PlayerController: NSObject, ObservableObject {
         lastKnownTime = presentation.currentTime
     }
 
+    private func publishDerivedChannelViewingActivity() {
+        guard let presentation = currentPresentation else { return }
+        if presentation.isPlaybackFailed || isPlaybackFailed {
+            publishChannelViewingActivity(.failed)
+            return
+        }
+
+        if presentation.isPaused {
+            publishChannelViewingActivity(.paused)
+            return
+        }
+
+        if isUsingKSPlayer {
+            if ksCoordinator?.state == .paused {
+                publishChannelViewingActivity(.paused)
+                return
+            }
+            let mediaIsAdvancing = ksCoordinator?.playerLayer?.player.isPlaying == true
+                && ksCoordinator?.playerLayer?.player.playbackState == .playing
+            publishChannelViewingActivity(mediaIsAdvancing ? .playing : .buffering)
+            return
+        }
+
+        let mediaIsAdvancing = !presentation.isBuffering
+            && player.timeControlStatus == .playing
+            && player.rate > 0
+        publishChannelViewingActivity(mediaIsAdvancing ? .playing : .buffering)
+    }
+
+    private func publishChannelViewingActivity(_ state: ChannelViewingPlaybackState) {
+        guard currentSource == .remoteCommand,
+              let channelID = currentChannelID,
+              UUID(uuidString: channelID) != nil else { return }
+        let event = ChannelViewingPlaybackEvent(
+            source: .remoteCommand,
+            channelID: channelID,
+            state: state
+        )
+        guard event != lastChannelViewingEvent else { return }
+        lastChannelViewingEvent = event
+        onChannelViewingPlaybackChanged?(event)
+    }
+
     // MARK: - Watchdog
 
     private func startWatchdog() {
@@ -1555,6 +1707,7 @@ final class PlayerController: NSObject, ObservableObject {
         let now = Date()
         lastInstabilityAt = now
         recoveryAttempt += 1
+        publishChannelViewingActivity(.buffering)
 
         playerLog.log("performEmergencyRecovery: reason=\(reason, privacy: .public) attempt=\(self.recoveryAttempt)/3 qualityTier=\(self.qualityTier)")
 
@@ -1576,16 +1729,23 @@ final class PlayerController: NSObject, ObservableObject {
         playerLog.log("performEmergencyRecovery: retrying in \(delay)s with re-resolve=\(shouldReResolve)")
 
         recoveryWorkItem?.cancel()
+        let currentRequest = playbackRequestArbiter.currentRequest()
         let workItem = DispatchWorkItem { [weak self] in
-            self?.performRetry(shouldReResolve: shouldReResolve)
+            self?.performRetry(
+                shouldReResolve: shouldReResolve,
+                expectedRequest: currentRequest
+            )
         }
         recoveryWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
-    private func performRetry(shouldReResolve: Bool) {
-        guard !isPlaybackFailed else {
-            playerLog.log("performRetry: already failed, ignoring")
+    private func performRetry(
+        shouldReResolve: Bool,
+        expectedRequest: PlaybackRequestArbiter.Request
+    ) {
+        guard playbackRequestArbiter.accepts(expectedRequest), !isPlaybackFailed else {
+            playerLog.log("performRetry: superseded or failed, ignoring")
             return
         }
 
@@ -1599,12 +1759,21 @@ final class PlayerController: NSObject, ObservableObject {
             playerLog.log("performRetry: re-resolving and replaying original URL \(url.absoluteString, privacy: .public)")
             let name = currentRadioName
             let source = currentSource ?? .remoteCommand
+            let channelID = currentChannelID
             let attempt = recoveryAttempt
-            let task = Task {
-                await play(urlString: url.absoluteString, radioName: name, source: source)
-                // play() performs a full cleanup, so retain the recovery budget
-                // across the final re-resolution attempt.
-                recoveryAttempt = attempt
+            let currentRequest = playbackRequestArbiter.currentRequest()
+            let task = Task { [weak self] in
+                guard !Task.isCancelled,
+                      let self,
+                      self.playbackRequestArbiter.accepts(currentRequest) else { return }
+                self.recoveryTask = nil
+                await self.play(
+                    urlString: url.absoluteString,
+                    radioName: name,
+                    source: source,
+                    channelID: channelID,
+                    restoringRecoveryAttempt: attempt
+                )
             }
             recoveryTask = task
         } else if isUsingKSPlayer, let url = currentURL {
@@ -1691,17 +1860,22 @@ final class PlayerController: NSObject, ObservableObject {
 
         let retryName = currentRadioName
         let retrySource = currentSource ?? .remoteCommand
+        let retryChannelID = currentChannelID
         let probe = offlineProbeCount
+        let currentRequest = playbackRequestArbiter.currentRequest()
         offlineProbeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled,
+                  let self,
+                  self.playbackRequestArbiter.accepts(currentRequest) else { return }
             self.offlineProbeTask = nil
             await self.play(
                 urlString: retryURL.absoluteString,
                 radioName: retryName,
-                source: retrySource
+                source: retrySource,
+                channelID: retryChannelID,
+                restoringOfflineProbeCount: probe
             )
-            self.offlineProbeCount = probe
         }
     }
 
