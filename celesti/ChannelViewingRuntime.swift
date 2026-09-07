@@ -56,6 +56,11 @@ final class ChannelViewingRuntime {
         }
     }
 
+    func drainBeforeLibraryRefresh() async {
+        await eventTask?.value
+        await controller.drainAvailableSegmentsNow()
+    }
+
     private func enqueue(
         _ operation: @escaping @Sendable (ChannelViewingHistoryController) async -> Void
     ) {

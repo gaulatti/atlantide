@@ -1118,7 +1118,7 @@ final class QuadPlayerController: ObservableObject {
     }
 
     private func notifyBackendStop(quadrant: Quadrant, deviceId: String) {
-        guard let url = URL(string: "https://api.celesti.gaulatti.com/devices/quad/stop/\(quadrant.rawValue)") else { return }
+        let url = CelestiAPIConfiguration.endpoint("devices/quad/stop/\(quadrant.rawValue)")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(deviceId, forHTTPHeaderField: "X-Device-ID")

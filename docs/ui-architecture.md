@@ -30,16 +30,49 @@ The user surface displays the nullable nickname returned by Celesti's device
 identity endpoint. An absent nickname is rendered as an explicit unavailable
 state rather than a fabricated display name.
 
-The device catalog loads lightweight summaries for both curated collections and
-imported M3U categories. Channels are fetched in pages only after a viewer opens
-a group, and the Sabella guide requests subsequent pages as focus reaches the
-end of the loaded lineup. Atlantide must not download the full library at home.
+The device catalog loads Mattone's lightweight summaries for curated
+collections, imported M3U categories, and additive smart groups. Atlantide
+preserves the response order exactly. When Mattone includes
+`smart:most-viewed`, its first position makes it the first non-empty Featured
+group on Home and the same summary appears once in Sabella's complete Channels
+directory. The smart kind maps to the distinct `chart.bar.fill` ranking icon;
+collection and source icon mappings remain unchanged.
+
+Most Viewed eligibility and ranking are server-owned. Mattone omits the summary
+until an owner has a current channel with more than 300 cumulative active
+seconds, so Atlantide has no threshold, local ranking, placeholder, or parallel
+cache. Selecting the summary uses the generic group endpoint. Channels are
+fetched in pages only after a viewer opens a group, each page remains in
+Mattone's order, and the Sabella guide requests subsequent pages as focus
+reaches the end of the loaded lineup. Atlantide must not download the full
+library at Home.
+
+Leaving on-device group playback first waits for queued viewing events, converts
+any automatic retry loop into one bounded delivery attempt, and serializes that
+attempt with the durable outbox. A retryable failure remains persisted for the
+normal background schedule instead of delaying the browser through its 1, 2,
+4, 8, 16, or 30-second backoff. Atlantide then refreshes summaries without
+replacing the restored browser with a loading screen. The browse page and
+focused group ID remain stable when the group still exists, allowing a newly
+eligible or re-ranked Most Viewed group to appear without relaunching. Manual
+refresh and retry continue to expose the established loading and failure
+states; a removed group clears a now-invalid focus ID.
 
 Atlantide view files are intentionally thin adapters. They translate Celesti
 presentation state into Sabella component inputs and attach product-specific
 remote actions. New visual primitives must be added to Sabella with a catalog
 fixture before Atlantide consumes them; do not add local fonts, colors, view
 modifiers, component styling, or brand artwork here.
+
+## Local API verification
+
+Release builds always use `https://api.celesti.gaulatti.com`. Debug builds may
+set `CELESTI_API_BASE_URL` to an absolute HTTP(S) base such as
+`http://localhost:3000` so a named tvOS simulator can exercise Mattone's root
+Compose stack. Invalid, credential-bearing, query-bearing, or fragment-bearing
+overrides fail startup instead of falling back. The override is compiled out of
+Release builds and changes the shared base for registration, channel browsing,
+viewing delivery, telemetry, SSE, and device actions together.
 
 ## Channel viewing history
 

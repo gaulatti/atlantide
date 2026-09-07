@@ -111,6 +111,7 @@ final class CelestiAppModel: ObservableObject {
     private var registrationTask: Task<Void, Never>?
     private var activeChannelGroupSummary: CelestiChannelGroupSummary?
     private var activeChannelGroupPage = 0
+    private var channelGroupsRefreshGeneration = 0
     private var started = false
 
     init() {
@@ -193,20 +194,29 @@ final class CelestiAppModel: ObservableObject {
         channelGuideLoadingMore = false
     }
 
-    func refreshChannelGroups() async {
-        channelGroupsLoading = true
+    func refreshChannelGroups(showLoading: Bool = true) async {
+        channelGroupsRefreshGeneration += 1
+        let generation = channelGroupsRefreshGeneration
+        if showLoading {
+            channelGroupsLoading = true
+        }
         channelGroupsError = nil
         do {
-            channelGroups = try await channelLibraryService.groupSummaries(deviceID: deviceId)
+            let summaries = try await channelLibraryService.groupSummaries(deviceID: deviceId)
+            guard generation == channelGroupsRefreshGeneration else { return }
+            channelGroups = summaries
             if let focusedChannelGroupID,
                !channelGroups.contains(where: { $0.id == focusedChannelGroupID }) {
                 self.focusedChannelGroupID = nil
             }
         } catch {
+            guard generation == channelGroupsRefreshGeneration else { return }
             channelGroups = []
             channelGroupsError = error.localizedDescription
         }
-        channelGroupsLoading = false
+        if generation == channelGroupsRefreshGeneration {
+            channelGroupsLoading = false
+        }
     }
 
     func selectChannelGroup(_ summary: CelestiChannelGroupSummary) async {
@@ -268,6 +278,11 @@ final class CelestiAppModel: ObservableObject {
         selectedChannelID = nil
         channelGuideVisible = false
         channelGuideLoadingMore = false
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.channelViewingRuntime?.drainBeforeLibraryRefresh()
+            await self.refreshChannelGroups(showLoading: false)
+        }
     }
 
     func loadMoreChannelsIfNeeded() {
@@ -289,14 +304,7 @@ final class CelestiAppModel: ObservableObject {
                 )
                 guard self.activeChannelGroupSummary?.id == summary.id,
                       let current = self.activeChannelGroup else { return }
-                let known = Set(current.channels.map(\.id))
-                let newChannels = next.channels.filter { !known.contains($0.id) }
-                self.activeChannelGroup = CelestiChannelGroup(
-                    id: current.id,
-                    name: current.name,
-                    channels: current.channels + newChannels,
-                    total: next.total
-                )
+                self.activeChannelGroup = current.appendingPage(next)
                 self.activeChannelGroupPage = nextPage
             } catch {
                 log.error("Could not load the next channel page: \(error.localizedDescription, privacy: .public)")
@@ -627,7 +635,7 @@ private struct RegistrationResponse: Decodable {
 private let registrationLog = Logger(subsystem: "com.gaulatti.celesti", category: "RegistrationService")
 
 private final class RegistrationService {
-    private let baseURL = URL(string: "https://api.celesti.gaulatti.com/devices/whoami")!
+    private let baseURL = CelestiAPIConfiguration.endpoint("devices/whoami")
 
     func checkRegistration(deviceId: String) async throws -> RegistrationCheckResult {
         var request = URLRequest(url: baseURL)
@@ -663,7 +671,7 @@ private final class RegistrationService {
 private let sseLog = Logger(subsystem: "com.gaulatti.celesti", category: "SSE")
 
 private final class CommandStreamClient {
-    private let baseURL = URL(string: "https://api.celesti.gaulatti.com/sse/events")!
+    private let baseURL = CelestiAPIConfiguration.endpoint("sse/events")
     private var streamTask: Task<Void, Never>?
 
     func connect(deviceId: String, onCommand: @escaping (CelestiCommand) -> Void) {

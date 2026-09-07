@@ -491,7 +491,7 @@ nonisolated struct MattoneChannelViewingTransport: ChannelViewingTransport {
     let client: any ChannelViewingHTTPClient
 
     init(
-        endpoint: URL = Self.productionEndpoint,
+        endpoint: URL = CelestiAPIConfiguration.endpoint("channel-viewing/segments"),
         deviceID: String,
         client: any ChannelViewingHTTPClient = URLSessionChannelViewingHTTPClient()
     ) {
@@ -597,6 +597,7 @@ actor ChannelViewingHistoryController {
     private var checkpointTask: Task<Void, Never>?
     private var deliveryTask: Task<Void, Never>?
     private var drainRequested = false
+    private var explicitDrainInProgress = false
 
     init(
         accumulator: ActiveChannelViewingAccumulator,
@@ -672,7 +673,20 @@ actor ChannelViewingHistoryController {
     }
 
     func drainAvailableSegmentsNow() async {
-        await drainAvailableSegments(retries: false)
+        explicitDrainInProgress = true
+        defer {
+            explicitDrainInProgress = false
+            if drainRequested {
+                drainRequested = false
+                requestDrain()
+            }
+        }
+        while let activeDelivery = deliveryTask {
+            drainRequested = false
+            activeDelivery.cancel()
+            await activeDelivery.value
+        }
+        await drainAvailableSegments(retries: false, ownsDeliveryTask: false)
     }
 
     private func applyEffectiveActivity() async {
@@ -736,17 +750,21 @@ actor ChannelViewingHistoryController {
         guard automaticTasks,
               registrationIsAvailable,
               networkIsAvailable else { return }
+        guard !explicitDrainInProgress else {
+            drainRequested = true
+            return
+        }
         guard deliveryTask == nil else {
             drainRequested = true
             return
         }
         drainRequested = false
         deliveryTask = Task { [weak self] in
-            await self?.drainAvailableSegments(retries: true)
+            await self?.drainAvailableSegments(retries: true, ownsDeliveryTask: true)
         }
     }
 
-    private func drainAvailableSegments(retries: Bool) async {
+    private func drainAvailableSegments(retries: Bool, ownsDeliveryTask: Bool) async {
         var schedule = ChannelViewingRetrySchedule()
         while !Task.isCancelled {
             if retries, (!registrationIsAvailable || !networkIsAvailable) { break }
@@ -760,7 +778,7 @@ actor ChannelViewingHistoryController {
 
             switch result {
             case .empty:
-                finishDeliveryTask()
+                finishDrain(ownsDeliveryTask: ownsDeliveryTask)
                 return
             case let .acknowledged(_, outcome):
                 diagnosticHandler(.delivered(outcome))
@@ -771,7 +789,7 @@ actor ChannelViewingHistoryController {
                     diagnosticHandler(.terminalRejection)
                 case .retryableFailure:
                     guard retries else {
-                        finishDeliveryTask()
+                        finishDrain(ownsDeliveryTask: ownsDeliveryTask)
                         return
                     }
                     let delay = schedule.nextDelaySeconds()
@@ -779,7 +797,7 @@ actor ChannelViewingHistoryController {
                     do {
                         try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
                     } catch {
-                        finishDeliveryTask()
+                        finishDrain(ownsDeliveryTask: ownsDeliveryTask)
                         return
                     }
                 case .recorded, .duplicate:
@@ -787,10 +805,11 @@ actor ChannelViewingHistoryController {
                 }
             }
         }
-        finishDeliveryTask()
+        finishDrain(ownsDeliveryTask: ownsDeliveryTask)
     }
 
-    private func finishDeliveryTask() {
+    private func finishDrain(ownsDeliveryTask: Bool) {
+        guard ownsDeliveryTask else { return }
         deliveryTask = nil
         guard drainRequested else { return }
         drainRequested = false
