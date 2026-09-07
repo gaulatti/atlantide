@@ -16,6 +16,9 @@ DerivedData/
 *.xcuserstate
 *.dSYM.zip
 *.dSYM
+# Xcode writes machine-specific absolute paths here; Package.resolved remains
+# the committed portable dependency lock.
+workspace-state.json
 
 # Swift Package Manager – build outputs
 .build/

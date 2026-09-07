@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select Xcode 26.6
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version
+      - name: Verify source and dependency contracts
+        run: scripts/verify-source-contract.sh
+      - name: Run resilience tests
+        run: swift test
+      - name: Resolve the locked remote package graph
+        run: |
+          xcodebuild \
+            -quiet \
+            -resolvePackageDependencies \
+            -project celesti.xcodeproj \
+            -scheme celesti \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages"
+      - name: Build the tvOS simulator application
+        run: |
+          xcodebuild \
+            -quiet \
+            -project celesti.xcodeproj \
+            -scheme celesti \
+            -sdk appletvsimulator \
+            -configuration Debug \
+            -derivedDataPath "${RUNNER_TEMP}/SimulatorDerivedData" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO \
+            ATLANTIDE_GIT_SHA="${GITHUB_SHA}" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build
+      - name: Build and inspect the unsigned Release application
+        run: |
+          xcodebuild \
+            -quiet \
+            -project celesti.xcodeproj \
+            -scheme celesti \
+            -configuration Release \
+            -destination 'generic/platform=tvOS' \
+            -derivedDataPath "${RUNNER_TEMP}/ReleaseDerivedData" \
+            -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            CODE_SIGNING_ALLOWED=NO \
+            ATLANTIDE_GIT_SHA="${GITHUB_SHA}" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build
+          scripts/verify-internal-app.sh \
+            "${RUNNER_TEMP}/ReleaseDerivedData/Build/Products/Release-appletvos/celesti.app" \
+            1.0 1 "${GITHUB_SHA}" unsigned
