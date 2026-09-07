@@ -4,6 +4,15 @@ import OSLog
 enum CelestiChannelGroupKind: String, Decodable, Equatable {
     case collection
     case source
+    case smart
+
+    var systemImage: String {
+        switch self {
+        case .collection: "rectangle.stack.fill"
+        case .source: "tray.full.fill"
+        case .smart: "chart.bar.fill"
+        }
+    }
 }
 
 struct CelestiChannelGroupSummary: Decodable, Identifiable, Equatable {
@@ -18,6 +27,18 @@ struct CelestiChannelGroup: Identifiable, Equatable {
     let name: String
     let channels: [CelestiChannel]
     let total: Int
+
+    func appendingPage(_ next: CelestiChannelGroup) -> CelestiChannelGroup {
+        precondition(id == next.id, "Cannot combine pages from different channel groups")
+        let known = Set(channels.map(\.id))
+        let newChannels = next.channels.filter { !known.contains($0.id) }
+        return CelestiChannelGroup(
+            id: id,
+            name: name,
+            channels: channels + newChannels,
+            total: next.total
+        )
+    }
 }
 
 struct CelestiChannel: Decodable, Identifiable, Equatable {
@@ -37,14 +58,39 @@ private struct CelestiChannelPage: Decodable {
     let limit: Int
 }
 
+nonisolated protocol ChannelLibraryHTTPClient: Sendable {
+    func data(for request: URLRequest) async throws -> (Data, URLResponse)
+}
+
+nonisolated struct URLSessionChannelLibraryHTTPClient: ChannelLibraryHTTPClient {
+    let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await session.data(for: request)
+    }
+}
+
 final class ChannelLibraryService {
-    private let endpoint = URL(string: "https://api.celesti.gaulatti.com/channel-groups/for-device")!
+    private let endpoint: URL
+    private let client: any ChannelLibraryHTTPClient
+
+    init(
+        endpoint: URL = CelestiAPIConfiguration.endpoint("channel-groups/for-device"),
+        client: any ChannelLibraryHTTPClient = URLSessionChannelLibraryHTTPClient()
+    ) {
+        self.endpoint = endpoint
+        self.client = client
+    }
 
     func groupSummaries(deviceID: String) async throws -> [CelestiChannelGroupSummary] {
         let url = endpoint.appendingPathComponent("summaries")
         var request = URLRequest(url: url)
         request.setValue(deviceID, forHTTPHeaderField: "X-Device-ID")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await client.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -69,7 +115,7 @@ final class ChannelLibraryService {
         ]
         var request = URLRequest(url: components.url!)
         request.setValue(deviceID, forHTTPHeaderField: "X-Device-ID")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await client.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }

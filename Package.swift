@@ -16,7 +16,6 @@ let package = Package(
             path: "celesti",
             exclude: [
                 "Assets.xcassets",
-                "ChannelLibrary.swift",
                 "CelestiStore.swift",
                 "ContentView.swift",
                 "DvrViews.swift",
@@ -29,6 +28,8 @@ let package = Package(
                 "celestiApp.swift",
             ],
             sources: [
+                "CelestiAPIConfiguration.swift",
+                "ChannelLibrary.swift",
                 "ChannelViewingHistory.swift",
                 "ChannelViewingRuntime.swift",
                 "PlaybackResiliencePolicy.swift",

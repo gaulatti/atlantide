@@ -48,7 +48,8 @@ struct ContentView: View {
         case .pending:
             SabellaTVChromeScreen(productName: "Celesti") {
                 SabellaTVRegistration(deviceID: appModel.deviceId, demo: appModel.showDemoMode) {
-                    if let image = QRCodeFactory.image(for: "https://api.celesti.gaulatti.com/register/\(appModel.deviceId)", size: 360) {
+                    let registrationURL = CelestiAPIConfiguration.endpoint("register/\(appModel.deviceId)")
+                    if let image = QRCodeFactory.image(for: registrationURL.absoluteString, size: 360) {
                         Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
                     } else {
                         ProgressView().tint(.black)
@@ -100,7 +101,7 @@ struct ContentView: View {
                 id: $0.id,
                 name: $0.name,
                 channelCount: $0.channelCount,
-                systemImage: $0.kind == .collection ? "rectangle.stack.fill" : "tray.full.fill"
+                systemImage: $0.kind.systemImage
             )
         })
     }

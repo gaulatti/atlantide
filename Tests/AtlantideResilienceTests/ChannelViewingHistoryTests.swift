@@ -359,6 +359,87 @@ import Testing
     #expect(await harness.outbox.count == 0)
 }
 
+@Test func explicitDrainSerializesWithAutomaticDeliveryBeforeReturning() async throws {
+    let harness = try ViewingHistoryHarness()
+    let transport = CancellableFirstChannelViewingTransport()
+    let controller = ChannelViewingHistoryController(
+        accumulator: harness.accumulator,
+        outbox: harness.outbox,
+        transport: transport
+    )
+
+    await controller.setRegistrationAvailable(true)
+    await controller.setNetworkAvailable(true)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .playing))
+    harness.monotonic.advance(by: 301)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .stopped))
+    await transport.waitUntilFirstDeliveryStarts()
+    await controller.drainAvailableSegmentsNow()
+
+    let delivered = await transport.delivered
+    let uniqueSeconds = Dictionary(grouping: delivered, by: \.segmentId)
+        .values
+        .compactMap { $0.first?.activeSeconds }
+        .reduce(0, +)
+    #expect(uniqueSeconds == 301)
+    #expect(delivered.prefix(2).map(\.segmentId).allSatisfy { $0 == delivered[0].segmentId })
+    #expect(await harness.outbox.count == 0)
+}
+
+@Test func explicitDrainCancelsRetryScheduleAndLeavesRetryableSegmentDurable() async throws {
+    let harness = try ViewingHistoryHarness()
+    let transport = RetryingChannelViewingTransport()
+    let controller = ChannelViewingHistoryController(
+        accumulator: harness.accumulator,
+        outbox: harness.outbox,
+        transport: transport
+    )
+
+    await controller.setRegistrationAvailable(true)
+    await controller.setNetworkAvailable(true)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .playing))
+    harness.monotonic.advance(by: 1)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .stopped))
+    await transport.waitForAttempt()
+
+    let clock = ContinuousClock()
+    let started = clock.now
+    await controller.drainAvailableSegmentsNow()
+
+    #expect(started.duration(to: clock.now) < .milliseconds(500))
+    #expect(await transport.attempts == 2)
+    #expect(await harness.outbox.count == 1)
+    #expect(await harness.outbox.snapshot[0].status == .retrying)
+}
+
+@Test func explicitDrainQueuesAutomaticStartUntilItsOneShotFinishes() async throws {
+    let harness = try ViewingHistoryHarness()
+    let transport = SuspendedChannelViewingTransport()
+    let controller = ChannelViewingHistoryController(
+        accumulator: harness.accumulator,
+        outbox: harness.outbox,
+        transport: transport
+    )
+
+    await controller.setRegistrationAvailable(true)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .playing))
+    harness.monotonic.advance(by: 1)
+    await controller.receive(playbackEvent(.onDevice, "channel-a", .stopped))
+
+    let barrier = Task { await controller.drainAvailableSegmentsNow() }
+    await transport.waitForAttempt()
+    await controller.setNetworkAvailable(true)
+    for _ in 0..<10 { await Task.yield() }
+    #expect(await transport.attempts == 1)
+
+    await transport.release()
+    await barrier.value
+    for _ in 0..<10 { await Task.yield() }
+
+    #expect(await transport.attempts == 1)
+    #expect(await harness.outbox.count == 0)
+}
+
 @Test func sourceSwitchPauseAndBackgroundCloseAttributionWithoutAcceptingStaleStops() async throws {
     let harness = try ViewingHistoryHarness()
     let transport = RecordingChannelViewingTransport()
@@ -567,6 +648,70 @@ private actor RecordingChannelViewingTransport: ChannelViewingTransport {
     func deliver(_ segment: ChannelViewingSegment) async -> ChannelViewingDeliveryOutcome {
         delivered.append(segment)
         return .recorded
+    }
+}
+
+private actor CancellableFirstChannelViewingTransport: ChannelViewingTransport {
+    private(set) var delivered: [ChannelViewingSegment] = []
+    private var firstDeliveryStarted = false
+
+    func deliver(_ segment: ChannelViewingSegment) async -> ChannelViewingDeliveryOutcome {
+        delivered.append(segment)
+        if delivered.count == 1 {
+            firstDeliveryStarted = true
+            do {
+                try await Task.sleep(for: .seconds(60))
+            } catch {
+                return .retryableFailure
+            }
+        }
+        return .recorded
+    }
+
+    func waitUntilFirstDeliveryStarts() async {
+        while !firstDeliveryStarted {
+            await Task.yield()
+        }
+    }
+
+}
+
+private actor RetryingChannelViewingTransport: ChannelViewingTransport {
+    private(set) var attempts = 0
+
+    func deliver(_ segment: ChannelViewingSegment) async -> ChannelViewingDeliveryOutcome {
+        attempts += 1
+        return .retryableFailure
+    }
+
+    func waitForAttempt() async {
+        while attempts == 0 {
+            await Task.yield()
+        }
+    }
+}
+
+private actor SuspendedChannelViewingTransport: ChannelViewingTransport {
+    private(set) var attempts = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func deliver(_ segment: ChannelViewingSegment) async -> ChannelViewingDeliveryOutcome {
+        attempts += 1
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+        return .recorded
+    }
+
+    func waitForAttempt() async {
+        while attempts == 0 {
+            await Task.yield()
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

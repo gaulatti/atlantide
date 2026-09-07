@@ -54,7 +54,7 @@ final class TelemetryReporter {
     private var activeChannelId: String?
 
     private init() {
-        self.baseURL = URL(string: "https://api.celesti.gaulatti.com/telemetry")!
+        self.baseURL = CelestiAPIConfiguration.endpoint("telemetry")
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 10
         config.timeoutIntervalForResource = 30
