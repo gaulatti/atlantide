@@ -28,7 +28,24 @@ jobs:
         run: scripts/verify-source-contract.sh
       - name: Run resilience tests
         run: swift test
+      - name: Configure private Sabella access
+        id: sabella-auth
+        env:
+          SABELLA_READ_TOKEN: ${{ secrets.SABELLA_READ_TOKEN }}
+        run: |
+          if [[ -z "${SABELLA_READ_TOKEN}" ]]; then
+            echo "available=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::SABELLA_READ_TOKEN is not configured; source contracts and tests ran, but remote package and tvOS build checks require that read-only credential."
+            exit 0
+          fi
+
+          authorization="$(printf 'x-access-token:%s' "${SABELLA_READ_TOKEN}" | base64)"
+          echo "::add-mask::${authorization}"
+          git config --global http.https://github.com/.extraheader \
+            "AUTHORIZATION: basic ${authorization}"
+          echo "available=true" >> "${GITHUB_OUTPUT}"
       - name: Resolve the locked remote package graph
+        if: steps.sabella-auth.outputs.available == 'true'
         run: |
           xcodebuild \
             -quiet \
@@ -37,6 +54,7 @@ jobs:
             -scheme celesti \
             -clonedSourcePackagesDirPath "${RUNNER_TEMP}/SourcePackages"
       - name: Build the tvOS simulator application
+        if: steps.sabella-auth.outputs.available == 'true'
         run: |
           xcodebuild \
             -quiet \
@@ -53,6 +71,7 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             build
       - name: Build and inspect the unsigned Release application
+        if: steps.sabella-auth.outputs.available == 'true'
         run: |
           xcodebuild \
             -quiet \
@@ -71,3 +90,7 @@ jobs:
           scripts/verify-internal-app.sh \
             "${RUNNER_TEMP}/ReleaseDerivedData/Build/Products/Release-appletvos/celesti.app" \
             1.0 1 "${GITHUB_SHA}" unsigned
+      - name: Remove private package credentials
+        if: always()
+        run: |
+          git config --global --unset-all http.https://github.com/.extraheader || true

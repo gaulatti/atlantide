@@ -30,6 +30,13 @@ version/build number.
 - A previously verified signed `.app` retained locally before replacing an
   existing installation.
 
+GitHub Actions also needs a fine-grained, read-only
+`SABELLA_READ_TOKEN` repository secret with access to the private
+`gaulatti/sabella` repository. Without it, CI still enforces the source contract
+and runs the resilience tests, then reports the package/build boundary as a
+notice instead of attempting an unauthenticated clone. Local internal builds use
+the operator's existing Git credentials and never print them.
+
 List candidates and record the chosen name, model, tvOS version, and Xcode
 destination ID/UDID without committing serial numbers or device identifiers.
 Use the `id` from `-showdestinations`; `devicectl` accepts that same UDID:
