@@ -800,6 +800,7 @@ final class PlayerController: NSObject, ObservableObject {
     private var errorObserver: NSObjectProtocol?
     private var currentSource: PlaybackSource?
     private var currentChannelID: String?
+    private var playbackWasExplicitlyPaused = false
     private var lastChannelViewingEvent: ChannelViewingPlaybackEvent?
     private var playbackRequestArbiter = PlaybackRequestArbiter()
     private var currentRadioName: String?
@@ -848,10 +849,7 @@ final class PlayerController: NSObject, ObservableObject {
     private let stableWindowForUpgrade: TimeInterval = 300.0
 
     var isPaused: Bool {
-        if isUsingKSPlayer {
-            return ksCoordinator?.state == .paused
-        }
-        return player.rate == 0 && player.timeControlStatus != .waitingToPlayAtSpecifiedRate
+        playbackWasExplicitlyPaused
     }
 
     var isPlaybackFailed: Bool = false
@@ -917,6 +915,7 @@ final class PlayerController: NSObject, ObservableObject {
         isUsingKSPlayer = false
         currentSource = nil
         currentChannelID = nil
+        playbackWasExplicitlyPaused = false
         lastChannelViewingEvent = nil
         currentRadioName = nil
         currentURL = nil
@@ -974,21 +973,25 @@ final class PlayerController: NSObject, ObservableObject {
             return
         }
         if isUsingKSPlayer {
-            if ksCoordinator?.state.isPlaying == true {
-                ksCoordinator?.playerLayer?.pause()
-                publishChannelViewingActivity(.paused)
-            } else {
+            if playbackWasExplicitlyPaused {
+                playbackWasExplicitlyPaused = false
                 ksCoordinator?.playerLayer?.play()
                 publishChannelViewingActivity(.buffering)
+            } else {
+                playbackWasExplicitlyPaused = true
+                ksCoordinator?.playerLayer?.pause()
+                publishChannelViewingActivity(.paused)
             }
             return
         }
-        let wasPaused = player.timeControlStatus == .paused || player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        let wasPaused = playbackWasExplicitlyPaused
         playerLog.log("togglePlayPause: wasPaused=\(wasPaused)")
         if wasPaused {
+            playbackWasExplicitlyPaused = false
             player.play()
             publishChannelViewingActivity(.buffering)
         } else {
+            playbackWasExplicitlyPaused = true
             player.pause()
             publishChannelViewingActivity(.paused)
         }
@@ -1095,6 +1098,7 @@ final class PlayerController: NSObject, ObservableObject {
         originalURL = inputURL
         currentSource = source
         currentChannelID = channelID
+        playbackWasExplicitlyPaused = false
         currentRadioName = radioName
         qualityTier = 3
         lastTierChangeAt = Date()
@@ -1344,7 +1348,7 @@ final class PlayerController: NSObject, ObservableObject {
             if state == .bufferFinished || currentTime > 0 {
                 presentation.isBuffering = false
             }
-            presentation.isPaused = state == .paused
+            presentation.isPaused = playbackWasExplicitlyPaused
             presentation.currentTime = currentTime
             presentation.duration = ksCoordinator?.playerLayer?.player.duration ?? 0
             updatePresentationDvr(&presentation)
@@ -1361,7 +1365,7 @@ final class PlayerController: NSObject, ObservableObject {
         presentation.isAudioOnly = !hasVideo && currentSource != .demo
         let wasBufferingPreviously = lastTelemetryBuffering
         presentation.isBuffering = player.timeControlStatus != .playing
-        presentation.isPaused = isPaused
+        presentation.isPaused = playbackWasExplicitlyPaused
         presentation.qualityTier = qualityTier
 
         if wasBufferingPreviously != presentation.isBuffering {
@@ -1533,7 +1537,7 @@ final class PlayerController: NSObject, ObservableObject {
         }
 
         if isUsingKSPlayer {
-            if ksCoordinator?.state == .paused {
+            if playbackWasExplicitlyPaused {
                 publishChannelViewingActivity(.paused)
                 return
             }

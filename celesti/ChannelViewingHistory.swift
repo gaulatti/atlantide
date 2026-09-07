@@ -81,6 +81,37 @@ nonisolated struct FileChannelViewingOutboxPersistence: ChannelViewingOutboxPers
     }
 }
 
+nonisolated struct UserDefaultsChannelViewingOutboxPersistence:
+    ChannelViewingOutboxPersistence,
+    @unchecked Sendable
+{
+    let defaults: UserDefaults
+    let key: String
+
+    init(
+        defaults: UserDefaults = .standard,
+        key: String = "celesti.channel-viewing-outbox"
+    ) {
+        self.defaults = defaults
+        self.key = key
+    }
+
+    func load() throws -> Data? {
+        defaults.data(forKey: key)
+    }
+
+    func save(_ data: Data) throws {
+        defaults.set(data, forKey: key)
+        guard defaults.data(forKey: key) == data else {
+            throw ChannelViewingPersistenceError.writeVerificationFailed
+        }
+    }
+}
+
+nonisolated enum ChannelViewingPersistenceError: Error, Equatable {
+    case writeVerificationFailed
+}
+
 nonisolated enum ChannelViewingOutboxError: Error, Equatable {
     case corruptState
     case unsupportedSchemaVersion(Int)

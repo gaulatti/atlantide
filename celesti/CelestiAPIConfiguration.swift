@@ -1,6 +1,6 @@
 import Foundation
 
-enum CelestiAPIConfiguration {
+nonisolated enum CelestiAPIConfiguration {
     static let productionBaseURL = URL(string: "https://api.celesti.gaulatti.com")!
     static let debugBaseURLEnvironmentKey = "CELESTI_API_BASE_URL"
 

@@ -97,8 +97,10 @@ While playback remains active, a task checkpoints no later than every 60
 seconds. Each successful checkpoint first atomically persists segments of at
 most 60 seconds to `DurableChannelViewingOutbox`; a stopping transition flushes
 the whole-second remainder and discards only sub-second residue. The production
-outbox is `channel-viewing-outbox.json` under Celesti's Application Support
-directory. It uses schema version `1`, a 1,000-segment bound, atomic file writes,
+outbox is stored as versioned data under the app-private
+`celesti.channel-viewing-outbox` user-defaults key because tvOS denies ordinary
+file creation in its app-data Documents and Application Support directories. It
+uses schema version `1`, a 1,000-segment bound, verified preference writes,
 and stable client-generated `segmentId` values across retries and relaunches.
 Corrupt or future schemas fail closed instead of being overwritten.
 

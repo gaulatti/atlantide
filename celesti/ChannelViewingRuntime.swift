@@ -14,17 +14,7 @@ final class ChannelViewingRuntime {
     private var eventTask: Task<Void, Never>?
 
     init(deviceID: String) throws {
-        let applicationSupport = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let persistence = FileChannelViewingOutboxPersistence(
-            fileURL: applicationSupport
-                .appendingPathComponent("com.gaulatti.celesti", isDirectory: true)
-                .appendingPathComponent("channel-viewing-outbox.json")
-        )
+        let persistence = UserDefaultsChannelViewingOutboxPersistence()
         let outbox = try DurableChannelViewingOutbox(persistence: persistence)
         let accumulator = ActiveChannelViewingAccumulator(outbox: outbox)
         let transport = MattoneChannelViewingTransport(deviceID: deviceID)

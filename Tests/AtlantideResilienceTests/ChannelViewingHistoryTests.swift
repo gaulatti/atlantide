@@ -152,6 +152,23 @@ import Testing
     #expect(await relaunchedOutbox.snapshot.map(\.segment) == [segment])
 }
 
+@Test func userDefaultsPersistenceRoundTripsTheVersionedOutbox() async throws {
+    let suiteName = "atlantide-viewing-history-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let persistence = UserDefaultsChannelViewingOutboxPersistence(defaults: defaults)
+    let segment = makeSegment(
+        id: UUID(uuidString: "00000000-0000-0000-0000-000000000008")!
+    )
+
+    let firstOutbox = try DurableChannelViewingOutbox(persistence: persistence)
+    try await firstOutbox.enqueue(segment)
+    #expect(defaults.data(forKey: "celesti.channel-viewing-outbox") != nil)
+
+    let relaunchedOutbox = try DurableChannelViewingOutbox(persistence: persistence)
+    #expect(await relaunchedOutbox.snapshot.map(\.segment) == [segment])
+}
+
 @Test func duplicateAcknowledgementRemovesExactlyOnceAndDuplicateEnqueueIsIdempotent() async throws {
     let persistence = MemoryChannelViewingPersistence()
     let outbox = try DurableChannelViewingOutbox(persistence: persistence)
