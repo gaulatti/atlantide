@@ -102,7 +102,7 @@
 			mainGroup = 71E4254A2F847C57003848A2;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A7B1C2D3E4F5061728394053 /* XCLocalSwiftPackageReference "../../sabella" */,
+				A7B1C2D3E4F5061728394053 /* XCRemoteSwiftPackageReference "sabella" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 71E425542F847C57003848A2 /* Products */;
@@ -363,17 +363,21 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		A7B1C2D3E4F5061728394053 /* XCLocalSwiftPackageReference "../../sabella" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../../sabella;
+/* Begin XCRemoteSwiftPackageReference section */
+		A7B1C2D3E4F5061728394053 /* XCRemoteSwiftPackageReference "sabella" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/gaulatti/sabella.git";
+			requirement = {
+				kind = revision;
+				revision = 39093d503a6f5950c504855105cb7c3b6ab8c6f1;
+			};
 		};
-/* End XCLocalSwiftPackageReference section */
+/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		A7B1C2D3E4F5061728394052 /* Sabella */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A7B1C2D3E4F5061728394053 /* XCLocalSwiftPackageReference "../../sabella" */;
+			package = A7B1C2D3E4F5061728394053 /* XCRemoteSwiftPackageReference "sabella" */;
 			productName = Sabella;
 		};
 /* End XCSwiftPackageProductDependency section */

@@ -5,9 +5,11 @@ operational controllers for remote single-stream, quad, and emergency modes. It
 does not own a parallel visual or remote-interaction system. Sabella owns both
 presentation and decoder selection for authenticated live-channel playback.
 
-All tvOS presentation is composed from the local Sabella Swift package at
-`../../sabella`. This includes typography, palette, brand assets, ambient and
-panel surfaces, registration and standby, loading and failure states, radio
+All tvOS presentation is composed from the remote Sabella Swift package pinned
+to exact revision `39093d503a6f5950c504855105cb7c3b6ab8c6f1`. No sibling checkout
+or moving branch participates in clean, CI, or internal builds. This includes
+typography, palette, brand assets, ambient and panel surfaces, registration and
+standby, loading and failure states, radio
 now-playing, callsign, DVR, quad layout, broadcast cells, test patterns,
 emergency layout and header, carousel state, marquee, and AVPlayer rendering.
 The authenticated browser is `SabellaTVChannelHome`; it owns the pinned Sabella
@@ -118,3 +120,7 @@ unified logs expose only bounded results (`recorded`, `duplicate`, `retry`,
 `terminal_rejection`, or persistence failure) and retry timing. They never log
 device, channel, segment, URL, timestamp, or payload values. Mattone owns the
 server-side viewing counter and database aggregate.
+
+Signed Release creation, physical-device installation, production smoke,
+rollback, and the destructive uninstall boundary are documented in
+[`internal-distribution.md`](internal-distribution.md).

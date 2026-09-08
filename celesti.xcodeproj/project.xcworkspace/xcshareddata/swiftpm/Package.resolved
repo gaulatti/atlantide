@@ -1,5 +1,5 @@
 {
-  "originHash" : "911e64a63d15997bda070c4954fb3ae55ee029539e1ad939a7430f9923b06d13",
+  "originHash" : "baa2102962aea659c4025d42647e87a9b0827c44f183e44949ecc32a139ae9b2",
   "pins" : [
     {
       "identity" : "ffmpegkit",
@@ -16,6 +16,14 @@
       "location" : "https://github.com/kingslay/KSPlayer.git",
       "state" : {
         "revision" : "10a40a1c0001d75307ad5922d1d1bc0cb01c89b4"
+      }
+    },
+    {
+      "identity" : "sabella",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/gaulatti/sabella.git",
+      "state" : {
+        "revision" : "39093d503a6f5950c504855105cb7c3b6ab8c6f1"
       }
     }
   ],
