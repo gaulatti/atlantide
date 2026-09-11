@@ -89,6 +89,35 @@ import Testing
     ])
 }
 
+@Test func explicitRadioMediumSurvivesChannelLibraryDecoding() async throws {
+    let client = ScriptedChannelLibraryClient(responses: [
+        .json(
+            """
+            {"data":[{"id":"radio-one","tvgName":"Radio One","tvgLogo":null,"streamUrl":"https://media.invalid/radio.mp3","groupTitle":"Radio","medium":"radio"}],"total":1,"page":1,"limit":20}
+            """
+        ),
+    ])
+    let service = ChannelLibraryService(
+        endpoint: URL(string: "http://localhost:3000/channel-groups/for-device")!,
+        client: client
+    )
+    let summary = CelestiChannelGroupSummary(
+        id: "collection-radio",
+        name: "Radio",
+        channelCount: 1,
+        kind: .collection
+    )
+
+    let page = try await service.channels(
+        deviceID: "LOCAL-OPERATOR-TV",
+        group: summary,
+        page: 1,
+        limit: 20
+    )
+
+    #expect(page.channels.first?.medium == .radio)
+}
+
 @Test func debugAPIBaseValidationRejectsAmbiguousOrCredentialedURLs() throws {
     #expect(try CelestiAPIConfiguration.validatedBaseURL("http://localhost:3000") == URL(string: "http://localhost:3000"))
     #expect(throws: CelestiAPIConfigurationError.invalidDebugBaseURL) {
@@ -105,7 +134,7 @@ import Testing
 private func channelPage(ids: [String], total: Int, page: Int, limit: Int) -> String {
     let channels = ids.map { id in
         """
-        {"id":"\(id)","tvgName":"\(id)","tvgLogo":null,"streamUrl":"https://media.invalid/\(id).m3u8","groupTitle":null}
+        {"id":"\(id)","tvgName":"\(id)","tvgLogo":null,"streamUrl":"https://media.invalid/\(id).m3u8","groupTitle":null,"medium":"automatic"}
         """
     }.joined(separator: ",")
     return """

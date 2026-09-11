@@ -41,12 +41,19 @@ struct CelestiChannelGroup: Identifiable, Equatable {
     }
 }
 
+enum CelestiChannelMedium: String, Decodable, Equatable {
+    case television
+    case radio
+    case automatic
+}
+
 struct CelestiChannel: Decodable, Identifiable, Equatable {
     let id: String
     let tvgName: String
     let tvgLogo: String?
     let streamUrl: String
     let groupTitle: String?
+    let medium: CelestiChannelMedium
 }
 
 private let channelLibraryLog = Logger(subsystem: "com.gaulatti.celesti", category: "ChannelLibrary")

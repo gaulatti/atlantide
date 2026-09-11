@@ -24,6 +24,7 @@ struct CelestiCommand: Decodable {
     let quadrant: Int?
     let layoutMode: String?
     let channelId: String?
+    let medium: CelestiChannelMedium?
     // Kept for compatibility with the short-lived Atlantide command shape.
     let mode: String?
 }
@@ -505,7 +506,8 @@ final class CelestiAppModel: ObservableObject {
                 await playerController.playStream(
                     urlString: url,
                     radioName: command.name ?? command.title,
-                    channelID: command.channelId
+                    channelID: command.channelId,
+                    medium: command.medium ?? .automatic
                 )
             }
         case "stop":
@@ -804,6 +806,7 @@ final class PlayerController: NSObject, ObservableObject {
     private var lastChannelViewingEvent: ChannelViewingPlaybackEvent?
     private var playbackRequestArbiter = PlaybackRequestArbiter()
     private var currentRadioName: String?
+    private var currentMedium: CelestiChannelMedium = .automatic
     var currentURL: URL?
     private var originalURL: URL?
     private var currentM3U8File: URL?
@@ -867,16 +870,22 @@ final class PlayerController: NSObject, ObservableObject {
             return
         }
         playerLog.log("playDemo: selected URL \(selected, privacy: .public)")
-        await play(urlString: selected, radioName: nil, source: .demo, channelID: nil)
+        await play(urlString: selected, radioName: nil, source: .demo, channelID: nil, medium: .television)
     }
 
-    func playStream(urlString: String, radioName: String?, channelID: String?) async {
+    func playStream(
+        urlString: String,
+        radioName: String?,
+        channelID: String?,
+        medium: CelestiChannelMedium
+    ) async {
         playerLog.log("playStream called: url=\(urlString, privacy: .public) name=\(radioName ?? "nil", privacy: .public)")
         await play(
             urlString: urlString,
             radioName: radioName,
             source: .remoteCommand,
-            channelID: channelID
+            channelID: channelID,
+            medium: medium
         )
     }
 
@@ -918,6 +927,7 @@ final class PlayerController: NSObject, ObservableObject {
         playbackWasExplicitlyPaused = false
         lastChannelViewingEvent = nil
         currentRadioName = nil
+        currentMedium = .automatic
         currentURL = nil
         originalURL = nil
         if let m3u8 = currentM3U8File {
@@ -1011,7 +1021,8 @@ final class PlayerController: NSObject, ObservableObject {
                 urlString: url.absoluteString,
                 radioName: name,
                 source: source,
-                channelID: channelID
+                channelID: channelID,
+                medium: self.currentMedium
             )
         }
     }
@@ -1072,7 +1083,8 @@ final class PlayerController: NSObject, ObservableObject {
                 urlString: url.absoluteString,
                 radioName: name,
                 source: source,
-                channelID: channelID
+                channelID: channelID,
+                medium: self.currentMedium
             )
         }
     }
@@ -1082,6 +1094,7 @@ final class PlayerController: NSObject, ObservableObject {
         radioName: String?,
         source: PlaybackSource,
         channelID: String?,
+        medium: CelestiChannelMedium,
         restoringRecoveryAttempt: Int? = nil,
         restoringOfflineProbeCount: Int? = nil
     ) async {
@@ -1098,6 +1111,7 @@ final class PlayerController: NSObject, ObservableObject {
         originalURL = inputURL
         currentSource = source
         currentChannelID = channelID
+        currentMedium = medium
         playbackWasExplicitlyPaused = false
         currentRadioName = radioName
         qualityTier = 3
@@ -1107,7 +1121,7 @@ final class PlayerController: NSObject, ObservableObject {
             source: source,
             radioName: radioName,
             streamTitle: nil,
-            isAudioOnly: false,
+            isAudioOnly: medium == .radio,
             isBuffering: true,
             qualityTier: qualityTier
         )
@@ -1362,7 +1376,11 @@ final class PlayerController: NSObject, ObservableObject {
         let presentationSize = item?.presentationSize ?? .zero
         let hasVideo = presentationSize != .zero
 
-        presentation.isAudioOnly = !hasVideo && currentSource != .demo
+        presentation.isAudioOnly = switch currentMedium {
+        case .radio: true
+        case .television: false
+        case .automatic: !hasVideo && currentSource != .demo
+        }
         let wasBufferingPreviously = lastTelemetryBuffering
         presentation.isBuffering = player.timeControlStatus != .playing
         presentation.isPaused = playbackWasExplicitlyPaused
@@ -1784,6 +1802,7 @@ final class PlayerController: NSObject, ObservableObject {
                     radioName: name,
                     source: source,
                     channelID: channelID,
+                    medium: self.currentMedium,
                     restoringRecoveryAttempt: attempt
                 )
             }
@@ -1864,7 +1883,7 @@ final class PlayerController: NSObject, ObservableObject {
             source: currentSource ?? .remoteCommand,
             radioName: currentRadioName,
             streamTitle: nil,
-            isAudioOnly: false,
+            isAudioOnly: currentMedium == .radio,
             isBuffering: false,
             isPlaybackFailed: true,
             failedStreamName: failedStreamName
@@ -1886,6 +1905,7 @@ final class PlayerController: NSObject, ObservableObject {
                 radioName: retryName,
                 source: retrySource,
                 channelID: retryChannelID,
+                medium: self.currentMedium,
                 restoringOfflineProbeCount: probe
             )
         }

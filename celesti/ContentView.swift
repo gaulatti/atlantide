@@ -134,7 +134,13 @@ private struct LiveChannelGroupView: View {
 
     private var channels: [SabellaTVChannel] {
         group.channels.enumerated().map { index, channel in
-            SabellaTVChannel(
+            let medium: SabellaTVChannelMedium
+            switch channel.medium {
+            case .television: medium = .television
+            case .radio: medium = .radio
+            case .automatic: medium = .automatic
+            }
+            return SabellaTVChannel(
                 id: channel.id,
                 streamURL: URL(string: channel.streamUrl)!,
                 number: String(format: "%03d", index + 1),
@@ -142,7 +148,9 @@ private struct LiveChannelGroupView: View {
                 mark: String(channel.tvgName.prefix(3)).uppercased(),
                 tone: [.sea, .red, .gold, .terracotta][index % 4],
                 now: channel.tvgName,
-                progress: 1
+                progress: 1,
+                backgroundPlayback: channel.medium == .radio ? .audio : channel.medium == .television ? .suspend : .automatic,
+                medium: medium
             )
         }
     }

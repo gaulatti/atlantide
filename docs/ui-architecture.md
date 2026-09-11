@@ -49,6 +49,13 @@ Mattone's order, and the Sabella guide requests subsequent pages as focus
 reaches the end of the loaded lineup. Atlantide must not download the full
 library at Home.
 
+Each channel page and remote playback command carries Mattone's authoritative
+`television`, `radio`, or `automatic` medium. Atlantide maps it directly to
+Sabella: radio opts into audio-first now-playing and background audio,
+television remains video-first and suspends in the background, and only
+automatic may use ready-media detection. Names, categories, logos, file
+extensions, and URLs never determine the medium.
+
 Leaving on-device group playback first waits for queued viewing events, converts
 any automatic retry loop into one bounded delivery attempt, and serializes that
 attempt with the durable outbox. A retryable failure remains persisted for the
