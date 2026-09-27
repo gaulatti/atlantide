@@ -10,6 +10,13 @@ enum PlaybackIdleTimerPolicy {
     static func isDisabled(for state: PlaybackIdleTimerState) -> Bool {
         state == .playing
     }
+
+    static func isDisabledForLiveChannel(
+        playbackState: ChannelViewingPlaybackState,
+        applicationIsActive: Bool
+    ) -> Bool {
+        applicationIsActive && playbackState == .playing
+    }
 }
 
 enum TelemetryLayoutMode: String, Encodable {
