@@ -56,6 +56,13 @@ television remains video-first and suspends in the background, and only
 automatic may use ready-media detection. Names, categories, logos, file
 extensions, and URLs never determine the medium.
 
+Remote quad and emergency commands also carry that medium into each visible
+player. An explicit radio pane displays the Sabella audio test pattern as soon
+as playback starts, including while the stream resolver is loading. The pane
+retains the medium through restart, recovery, offline probes, and emergency
+carousel rotation; track discovery cannot replace an explicit radio or
+television designation. Automatic panes continue to use detected media.
+
 While the on-device live player confirms that the selected channel is playing
 and the app is active, Atlantide disables the tvOS idle timer so the TV keeps
 showing the video or radio now-playing screen without remote input. Starting,

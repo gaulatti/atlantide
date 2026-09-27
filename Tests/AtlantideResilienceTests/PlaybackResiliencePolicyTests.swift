@@ -2,6 +2,26 @@ import Foundation
 import Testing
 @testable import AtlantideResilience
 
+@Test func explicitRadioRemainsVisualizedAcrossDetectionAndRecoveryStates() {
+    for hasVideo in [false, true] {
+        for contentTypeIsAudio in [false, true] {
+            #expect(PlaybackMediumPresentationPolicy.isAudioOnly(
+                medium: .radio,
+                contentTypeIsAudio: contentTypeIsAudio,
+                hasVideo: hasVideo
+            ))
+            #expect(!PlaybackMediumPresentationPolicy.isAudioOnly(
+                medium: .television,
+                contentTypeIsAudio: contentTypeIsAudio,
+                hasVideo: hasVideo
+            ))
+        }
+    }
+    #expect(PlaybackMediumPresentationPolicy.isAudioOnly(medium: .automatic, contentTypeIsAudio: true, hasVideo: false))
+    #expect(!PlaybackMediumPresentationPolicy.isAudioOnly(medium: .automatic, contentTypeIsAudio: true, hasVideo: true))
+    #expect(!PlaybackMediumPresentationPolicy.isAudioOnly(medium: .automatic, contentTypeIsAudio: false, hasVideo: false))
+}
+
 @Test func bufferProfilesMatchAcceptedLowAndHighMemoryPolicy() {
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 2_048) == profile(15, 30, 2_048, true))
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 4_096) == profile(20, 45, 4_096, false))
