@@ -1,5 +1,49 @@
 import Foundation
 
+enum PlaybackMediumPresentationPolicy {
+    static func isAudioOnly(
+        medium: CelestiChannelMedium,
+        contentTypeIsAudio: Bool,
+        hasVideo: Bool
+    ) -> Bool {
+        switch medium {
+        case .radio: true
+        case .television: false
+        case .automatic: !hasVideo && contentTypeIsAudio
+        }
+    }
+
+    static func ksPlayerAudioOnly(
+        medium: CelestiChannelMedium,
+        videoTrackCount: Int,
+        audioTrackCount: Int,
+        hasVideoSize: Bool,
+        previous: Bool
+    ) -> Bool {
+        switch medium {
+        case .radio: return true
+        case .television: return false
+        case .automatic:
+            if videoTrackCount > 0 || hasVideoSize { return false }
+            if audioTrackCount > 0 { return true }
+            return previous
+        }
+    }
+}
+
+struct AutomaticAudioTrackConfirmation {
+    private(set) var consecutiveAudioOnlySamples = 0
+
+    mutating func observe(hasVideo: Bool, hasAudio: Bool) -> Bool {
+        if hasVideo || !hasAudio {
+            consecutiveAudioOnlySamples = 0
+            return false
+        }
+        consecutiveAudioOnlySamples += 1
+        return consecutiveAudioOnlySamples >= 3
+    }
+}
+
 enum PlaybackIdleTimerState {
     case inactive
     case playing

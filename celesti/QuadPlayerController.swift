@@ -202,11 +202,13 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     var onViewingActivityChanged: ((String, ChannelViewingPlaybackState) -> Void)?
 
     private var originalURL: URL?
+    private var currentMedium: CelestiChannelMedium = .automatic
     var currentURL: URL?
     private var currentM3U8File: URL?
     private var updateTask: Task<Void, Never>?
     private var trackDetectionTask: Task<Void, Never>?
     private var explicitlyAudioOnly = false
+    private var confirmedAudioOnly = false
     private var errorObserver: NSObjectProtocol?
     private var endObserver: NSObjectProtocol?
     private let audioPeakMonitor = AudioPeakMonitor()
@@ -248,6 +250,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         name: String?,
         logoURLString: String? = nil,
         channelId: String? = nil,
+        medium: CelestiChannelMedium,
         preserveRecoveryState: Bool = false
     ) async {
         guard let inputURL = URL(string: urlString) else {
@@ -270,13 +273,14 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         }
         recoveryAttempt = 0
         originalURL = inputURL
+        currentMedium = medium
         currentChannelId = channelId
         streamName = name ?? inputURL.lastPathComponent
         logoURL = logoURLString.flatMap(URL.init(string:))
         isActive = true
         isBuffering = true
         isFailed = false
-        isAudioOnly = false
+        isAudioOnly = medium == .radio
 
         let resolved = await StreamResolver().resolve(url: inputURL)
         guard generation == playbackGeneration else { return }
@@ -285,7 +289,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .hasPrefix("audio/") == true
-        isAudioOnly = explicitlyAudioOnly
+        isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
+            medium: medium,
+            contentTypeIsAudio: explicitlyAudioOnly,
+            hasVideo: false
+        )
 
         if resolved.contentType == "video/mp2t" || resolved.contentType == "rtmp" || resolved.contentType?.contains("dash+xml") == true || urlString.contains(".mpd") {
             playWithKSPlayer(url: resolved.url, contentType: resolved.contentType)
@@ -323,9 +331,8 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         avPlayer.isMuted = isMuted
         avPlayer.play()
 
-        // A live HLS asset may initially report zero video tracks even when it
-        // contains video. Only positive video evidence is authoritative here;
-        // an audio MIME type is handled immediately above.
+        // HLS can expose tracks after playback starts. An automatic stream
+        // needs three consecutive audio-only samples before showing radio.
         trackDetectionTask = Task { [weak self, weak item] in
             guard let self, let item else { return }
             do {
@@ -333,24 +340,42 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 async let audioTracksResult = asset.loadTracks(withMediaType: .audio)
                 let (videoTracks, audioTracks) = try await (videoTracksResult, audioTracksResult)
                 guard self.avPlayer.currentItem === item else { return }
-                if !videoTracks.isEmpty {
-                    self.isAudioOnly = false
-                }
+                var peakAttached = false
                 if let audioTrack = audioTracks.first {
                     self.audioPeakMonitor.attach(to: item, track: audioTrack)
-                } else {
-                    // HLS frequently exposes its selected audio track only on
-                    // AVPlayerItem after playback has started.
-                    for _ in 0..<20 {
-                        try? await Task.sleep(for: .milliseconds(500))
-                        guard self.avPlayer.currentItem === item else { return }
-                        if let audioTrack = item.tracks
-                            .compactMap(\.assetTrack)
-                            .first(where: { $0.mediaType == .audio }) {
-                            self.audioPeakMonitor.attach(to: item, track: audioTrack)
-                            break
-                        }
+                    peakAttached = true
+                }
+                var confirmation = AutomaticAudioTrackConfirmation()
+                var classificationComplete = self.currentMedium != .automatic || self.explicitlyAudioOnly
+                for sample in 0..<20 {
+                    guard !Task.isCancelled, self.avPlayer.currentItem === item else { return }
+                    let selectedTracks = item.tracks.compactMap(\.assetTrack)
+                    let hasVideo = !videoTracks.isEmpty
+                        || selectedTracks.contains(where: { $0.mediaType == .video })
+                        || item.presentationSize != .zero
+                    let hasAudio = !audioTracks.isEmpty
+                        || selectedTracks.contains(where: { $0.mediaType == .audio })
+                    if !peakAttached,
+                       let audioTrack = selectedTracks.first(where: { $0.mediaType == .audio }) {
+                        self.audioPeakMonitor.attach(to: item, track: audioTrack)
+                        peakAttached = true
                     }
+                    if hasVideo {
+                        self.confirmedAudioOnly = false
+                        self.isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
+                            medium: self.currentMedium,
+                            contentTypeIsAudio: self.explicitlyAudioOnly,
+                            hasVideo: true
+                        )
+                        classificationComplete = true
+                    } else if !classificationComplete,
+                              confirmation.observe(hasVideo: false, hasAudio: hasAudio) {
+                        self.confirmedAudioOnly = true
+                        self.isAudioOnly = true
+                        classificationComplete = true
+                    }
+                    if peakAttached && classificationComplete { break }
+                    if sample < 19 { try? await Task.sleep(for: .milliseconds(500)) }
                 }
                 quadLog.log("[\(self.quadrant.displayName)] asset video tracks=\(videoTracks.count)")
             } catch {
@@ -447,6 +472,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         isFailed = false
         isAudioOnly = false
         explicitlyAudioOnly = false
+        confirmedAudioOnly = false
         bufferingCandidateAt = nil
         bufferingTelemetryReported = false
         offlineProbeCount = 0
@@ -461,6 +487,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         audioPeakMonitor.reset()
         currentURL = nil
         originalURL = nil
+        currentMedium = .automatic
         currentChannelId = nil
         logoURL = nil
 
@@ -498,12 +525,14 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let name = streamName
         let logo = logoURL?.absoluteString
         let channelId = currentChannelId
+        let medium = currentMedium
         Task {
             await play(
                 urlString: url.absoluteString,
                 name: name,
                 logoURLString: logo,
-                channelId: channelId
+                channelId: channelId,
+                medium: medium
             )
         }
     }
@@ -618,11 +647,15 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         }
 
         let item = avPlayer.currentItem
-        if item?.presentationSize != .zero {
-            isAudioOnly = false
-        } else if explicitlyAudioOnly {
-            isAudioOnly = true
-        }
+        let hasVideo = item.map { $0.presentationSize != .zero
+            || $0.tracks.contains(where: { $0.assetTrack?.mediaType == .video })
+        } ?? false
+        if hasVideo { confirmedAudioOnly = false }
+        isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
+            medium: currentMedium,
+            contentTypeIsAudio: explicitlyAudioOnly || confirmedAudioOnly,
+            hasVideo: hasVideo
+        )
         let wasBuffering = isBuffering
         isBuffering = avPlayer.timeControlStatus != .playing
         if wasBuffering != isBuffering {
@@ -664,7 +697,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let audioTracks = mediaPlayer.tracks(mediaType: .audio)
         // Wait until the demuxer has exposed at least one track before deciding.
         if !videoTracks.isEmpty || !audioTracks.isEmpty {
-            isAudioOnly = videoTracks.isEmpty
+            isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
+                medium: currentMedium,
+                contentTypeIsAudio: explicitlyAudioOnly || videoTracks.isEmpty,
+                hasVideo: !videoTracks.isEmpty
+            )
         }
     }
 
@@ -849,11 +886,13 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             let name = streamName
             let logo = logoURL?.absoluteString
             let channelId = currentChannelId
+            let medium = currentMedium
             await play(
                 urlString: url.absoluteString,
                 name: name,
                 logoURLString: logo,
                 channelId: channelId,
+                medium: medium,
                 preserveRecoveryState: true
             )
             recoveryAttempt = nextAttempt
@@ -896,6 +935,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let name = streamName
         let logo = logoURL?.absoluteString
         let channelId = currentChannelId
+        let medium = currentMedium
         offlineProbeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self else { return }
@@ -905,6 +945,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 name: name,
                 logoURLString: logo,
                 channelId: channelId,
+                medium: medium,
                 preserveRecoveryState: true
             )
         }
@@ -1014,14 +1055,16 @@ final class QuadPlayerController: ObservableObject {
         name: String?,
         logoURLString: String? = nil,
         channelId: String? = nil,
-        quadrant: Quadrant
+        quadrant: Quadrant,
+        medium: CelestiChannelMedium
     ) async {
         isActive = true
         await player(for: quadrant).play(
             urlString: urlString,
             name: name,
             logoURLString: logoURLString,
-            channelId: channelId
+            channelId: channelId,
+            medium: medium
         )
         applyVolumes()
     }

@@ -6,7 +6,7 @@ does not own a parallel visual or remote-interaction system. Sabella owns both
 presentation and decoder selection for authenticated live-channel playback.
 
 All tvOS presentation is composed from the remote Sabella Swift package pinned
-to exact revision `39093d503a6f5950c504855105cb7c3b6ab8c6f1`. No sibling checkout
+to exact revision `0c7a4bbb858209118f00cb61aea5d65f468cff8b`. No sibling checkout
 or moving branch participates in clean, CI, or internal builds. This includes
 typography, palette, brand assets, ambient and panel surfaces, registration and
 standby, loading and failure states, radio
@@ -55,6 +55,21 @@ Sabella: radio opts into audio-first now-playing and background audio,
 television remains video-first and suspends in the background, and only
 automatic may use ready-media detection. Names, categories, logos, file
 extensions, and URLs never determine the medium.
+
+Remote quad and emergency commands also carry that medium into each visible
+player. An explicit radio pane displays the Sabella audio test pattern as soon
+as playback starts, including while the stream resolver is loading. The pane
+retains the medium through restart, recovery, offline probes, and emergency
+carousel rotation; track discovery cannot replace an explicit radio or
+television designation. Automatic panes continue to use detected media.
+An automatic AVPlayer pane with an unknown MIME type switches to the radio
+test pattern after three consecutive samples show audio and no video. Positive
+video evidence keeps or restores the video surface.
+Remote single streams using KSPlayer make the same presentation decision from
+the player reports: a confirmed audio track with no video shows radio
+now-playing, while a video track or video size shows the video surface. Until
+tracks are known, the current presentation remains stable. Explicit medium
+always takes precedence.
 
 While the on-device live player confirms that the selected channel is playing
 and the app is active, Atlantide disables the tvOS idle timer so the TV keeps
