@@ -92,6 +92,10 @@ final class CelestiAppModel: ObservableObject {
                     )
                 )
             }
+            if oldValue != nil, activeChannelGroup == nil {
+                liveChannelPlaybackState = .stopped
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
         }
     }
     @Published var selectedChannelID: String?
@@ -112,6 +116,8 @@ final class CelestiAppModel: ObservableObject {
     private var registrationTask: Task<Void, Never>?
     private var activeChannelGroupSummary: CelestiChannelGroupSummary?
     private var activeChannelGroupPage = 0
+    private var liveChannelPlaybackState: ChannelViewingPlaybackState = .stopped
+    private var applicationIsActive = false
     private var channelGroupsRefreshGeneration = 0
     private var started = false
 
@@ -245,6 +251,8 @@ final class CelestiAppModel: ObservableObject {
     }
 
     func selectLiveChannel(_ channel: CelestiChannel) {
+        liveChannelPlaybackState = .starting
+        updateLiveChannelIdleTimer()
         selectedChannelID = channel.id
         TelemetryReporter.shared.setActiveChannel(channel.id)
     }
@@ -258,6 +266,9 @@ final class CelestiAppModel: ObservableObject {
         case .failed: .failed
         case .stopped: .stopped
         }
+        guard activeChannelGroup != nil, activity.channelID == selectedChannelID else { return }
+        liveChannelPlaybackState = state
+        updateLiveChannelIdleTimer()
         channelViewingRuntime?.receive(
             ChannelViewingPlaybackEvent(
                 source: .onDevice,
@@ -268,7 +279,17 @@ final class CelestiAppModel: ObservableObject {
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
+        applicationIsActive = phase == .active
+        updateLiveChannelIdleTimer()
         channelViewingRuntime?.setApplicationActive(phase == .active)
+    }
+
+    private func updateLiveChannelIdleTimer() {
+        guard activeChannelGroup != nil else { return }
+        UIApplication.shared.isIdleTimerDisabled = PlaybackIdleTimerPolicy.isDisabledForLiveChannel(
+            playbackState: liveChannelPlaybackState,
+            applicationIsActive: applicationIsActive
+        )
     }
 
     func leaveChannelGroupPlayback() {

@@ -31,6 +31,11 @@ import Testing
     #expect(PlaybackIdleTimerPolicy.isDisabled(for: .playing))
     #expect(!PlaybackIdleTimerPolicy.isDisabled(for: .inactive))
     #expect(!PlaybackIdleTimerPolicy.isDisabled(for: .offlineProbe))
+    #expect(PlaybackIdleTimerPolicy.isDisabledForLiveChannel(playbackState: .playing, applicationIsActive: true))
+    for state in [ChannelViewingPlaybackState.starting, .buffering, .paused, .failed, .stopped] {
+        #expect(!PlaybackIdleTimerPolicy.isDisabledForLiveChannel(playbackState: state, applicationIsActive: true))
+    }
+    #expect(!PlaybackIdleTimerPolicy.isDisabledForLiveChannel(playbackState: .playing, applicationIsActive: false))
 }
 
 @Test func outOfOrderPlaybackResolutionAcceptsOnlyTheLatestRequest() {

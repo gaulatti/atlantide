@@ -56,6 +56,13 @@ television remains video-first and suspends in the background, and only
 automatic may use ready-media detection. Names, categories, logos, file
 extensions, and URLs never determine the medium.
 
+While the on-device live player confirms that the selected channel is playing
+and the app is active, Atlantide disables the tvOS idle timer so the TV keeps
+showing the video or radio now-playing screen without remote input. Starting,
+buffering, pause, failure, channel exit, and app inactivity release the idle
+timer. Background radio audio remains allowed by Sabella's audio-session policy;
+it does not keep the TV display awake.
+
 Leaving on-device group playback first waits for queued viewing events, converts
 any automatic retry loop into one bounded delivery attempt, and serializes that
 attempt with the durable outbox. A retryable failure remains persisted for the
