@@ -62,6 +62,9 @@ as playback starts, including while the stream resolver is loading. The pane
 retains the medium through restart, recovery, offline probes, and emergency
 carousel rotation; track discovery cannot replace an explicit radio or
 television designation. Automatic panes continue to use detected media.
+An automatic AVPlayer pane with an unknown MIME type switches to the radio
+test pattern after three consecutive samples show audio and no video. Positive
+video evidence keeps or restores the video surface.
 Remote single streams using KSPlayer make the same presentation decision from
 the player reports: a confirmed audio track with no video shows radio
 now-playing, while a video track or video size shows the video surface. Until

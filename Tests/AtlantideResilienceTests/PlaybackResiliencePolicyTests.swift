@@ -33,6 +33,23 @@ import Testing
     #expect(!classify(.television, 0, 1, false, true))
 }
 
+@Test func automaticAVPlayerRequiresRepeatedAudioOnlyEvidence() {
+    var confirmation = AutomaticAudioTrackConfirmation()
+    let first = confirmation.observe(hasVideo: false, hasAudio: true)
+    let second = confirmation.observe(hasVideo: false, hasAudio: true)
+    let third = confirmation.observe(hasVideo: false, hasAudio: true)
+    let video = confirmation.observe(hasVideo: true, hasAudio: true)
+    #expect(!first)
+    #expect(!second)
+    #expect(third)
+    #expect(!video)
+    #expect(confirmation.consecutiveAudioOnlySamples == 0)
+    let noTracks = confirmation.observe(hasVideo: false, hasAudio: false)
+    let firstAgain = confirmation.observe(hasVideo: false, hasAudio: true)
+    #expect(!noTracks)
+    #expect(!firstAgain)
+}
+
 @Test func bufferProfilesMatchAcceptedLowAndHighMemoryPolicy() {
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 2_048) == profile(15, 30, 2_048, true))
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 4_096) == profile(20, 45, 4_096, false))
