@@ -199,6 +199,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     @Published var failureStatus = "RETRYING"
     var onPlaybackFailure: ((String?) -> Void)?
     var onStableRecovery: (() -> Void)?
+    var onViewingActivityChanged: ((String, ChannelViewingPlaybackState) -> Void)?
 
     private var originalURL: URL?
     var currentURL: URL?
@@ -213,6 +214,13 @@ final class QuadrantPlayer: NSObject, ObservableObject {
 
     private let maxBitrate: Double = 800_000
     private var currentChannelId: String?
+    private var playbackGeneration = 0
+    private var viewingDetector = AdvancingPlaybackDetector()
+    private var lastViewingState: ChannelViewingPlaybackState?
+    var viewingSnapshot: (channelID: String, state: ChannelViewingPlaybackState)? {
+        guard let currentChannelId, let lastViewingState else { return nil }
+        return (currentChannelId, lastViewingState)
+    }
     private var recoveryAttempt = 0
     private var bufferingTelemetryReported = false
     private var bufferingCandidateAt: Date?
@@ -255,6 +263,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let retainedProbeCount = offlineProbeCount
         let retainedRecoveryTimes = recentRecoveryTimes
         stop()
+        let generation = playbackGeneration
         if preserveRecoveryState {
             offlineProbeCount = retainedProbeCount
             recentRecoveryTimes = retainedRecoveryTimes
@@ -270,6 +279,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         isAudioOnly = false
 
         let resolved = await StreamResolver().resolve(url: inputURL)
+        guard generation == playbackGeneration else { return }
         currentURL = resolved.url
         explicitlyAudioOnly = resolved.contentType?
             .lowercased()
@@ -395,8 +405,14 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     }
 
     func stop() {
+        playbackGeneration += 1
         quadLog.log("[\(self.quadrant.displayName)] stop")
         let stoppedChannelId = currentChannelId
+        if let stoppedChannelId, lastViewingState != .stopped {
+            onViewingActivityChanged?(stoppedChannelId, .stopped)
+        }
+        lastViewingState = nil
+        viewingDetector.reset()
         updateTask?.cancel()
         updateTask = nil
         offlineProbeTask?.cancel()
@@ -585,6 +601,10 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         if isUsingKSPlayer {
             let state = ksCoordinator?.state ?? .initialized
             let currentTime = ksCoordinator?.playerLayer?.player.currentPlaybackTime ?? 0
+            publishViewingActivity(
+                position: currentTime,
+                claimsToBePlaying: state == .bufferFinished
+            )
             let nowBuffering = !(state == .bufferFinished || currentTime > 0)
             updateBufferingTelemetry(nowBuffering, decoderType: .software)
             if state == .bufferFinished || currentTime > 0 {
@@ -610,6 +630,10 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         }
         updateBufferingTelemetry(isBuffering, decoderType: .hardware)
         let position = finiteSeconds(avPlayer.currentTime())
+        publishViewingActivity(
+            position: position,
+            claimsToBePlaying: avPlayer.timeControlStatus == .playing && avPlayer.rate > 0
+        )
         let bufferedDuration = bufferedDurationForAVPlayer()
         logHealthIfNeeded(position: position, bufferedDuration: bufferedDuration, decoderType: .hardware)
         detectFrozenPlayback(
@@ -617,6 +641,18 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             claimsToBePlaying: avPlayer.timeControlStatus == .playing && avPlayer.rate > 0
         )
         resetRecoveryCircuitIfStable(claimsToBePlaying: avPlayer.timeControlStatus == .playing)
+    }
+
+    private func publishViewingActivity(position: TimeInterval, claimsToBePlaying: Bool) {
+        guard let currentChannelId, UUID(uuidString: currentChannelId) != nil else { return }
+        let state = viewingDetector.state(
+            position: position,
+            claimsToBePlaying: claimsToBePlaying && !isFailed,
+            now: ProcessInfo.processInfo.systemUptime
+        )
+        guard state != lastViewingState else { return }
+        lastViewingState = state
+        onViewingActivityChanged?(currentChannelId, state)
     }
 
     private func updateKSPlayerMediaKind() {
@@ -951,6 +987,7 @@ final class QuadPlayerController: ObservableObject {
     @Published var isFocusBorderVisible = true
     @Published var isActive = false
     @Published var expandedQuadrant: Quadrant?
+    var onViewingActivityChanged: ((Quadrant, String, ChannelViewingPlaybackState) -> Void)?
 
     private var players: [Quadrant: QuadrantPlayer] = [:]
     private var unmutedByUser: Set<Quadrant> = []
@@ -961,6 +998,13 @@ final class QuadPlayerController: ObservableObject {
             return existing
         }
         let newPlayer = QuadrantPlayer(quadrant: quadrant)
+        newPlayer.onViewingActivityChanged = { [weak self] channelID, state in
+            guard let self else { return }
+            let visibleState: ChannelViewingPlaybackState =
+                self.expandedQuadrant != nil && self.expandedQuadrant != quadrant && state != .stopped
+                ? .paused : state
+            self.onViewingActivityChanged?(quadrant, channelID, visibleState)
+        }
         players[quadrant] = newPlayer
         return newPlayer
     }
@@ -1043,6 +1087,11 @@ final class QuadPlayerController: ObservableObject {
     func showFocusedSingleView() {
         guard expandedQuadrant == nil else { return }
         expandedQuadrant = focusedQuadrant
+        for (quadrant, player) in players where quadrant != focusedQuadrant {
+            if let snapshot = player.viewingSnapshot {
+                onViewingActivityChanged?(quadrant, snapshot.channelID, .paused)
+            }
+        }
         applyVolumes()
     }
 
@@ -1050,6 +1099,11 @@ final class QuadPlayerController: ObservableObject {
     func restoreQuadView() -> Bool {
         guard expandedQuadrant != nil else { return false }
         expandedQuadrant = nil
+        for (quadrant, player) in players {
+            if let snapshot = player.viewingSnapshot {
+                onViewingActivityChanged?(quadrant, snapshot.channelID, snapshot.state)
+            }
+        }
         applyVolumes()
         revealFocusBorderTemporarily()
         return true

@@ -85,14 +85,19 @@ viewing delivery, telemetry, SSE, and device actions together.
 
 ## Channel viewing history
 
-`ChannelViewingHistoryController` is the one attribution boundary for eligible
-single-channel playback. The on-device browser passes Sabella's semantic
-`SabellaTVPlaybackActivity` callback into it. The legacy single-player
-controller reports the same product states only when a remote command includes
-an authoritative channel UUID. A per-request generation guard prevents an older
-asynchronous stream resolution from replacing newer media and attributing it to
-the newer channel. Demo, quad, emergency, guide focus, and preview paths never
-enter the controller.
+`ChannelViewingHistoryController` owns each active channel's attribution. The
+on-device browser passes Sabella's semantic `SabellaTVPlaybackActivity` callback
+into it. Remote single playback reports the same product states only when a
+command includes an authoritative channel UUID. Quad and emergency players
+report each visible pane separately after the engine's media position advances;
+muting or changing audio focus does not remove a visible pane from viewing.
+Expanding one quad pane pauses attribution for the three hidden panes until
+the quad view returns.
+Concurrent panes with the same channel ID share one active interval on that TV,
+while distinct channels accrue independently. Emergency offline probe players
+do not count. Per-request generation guards prevent older asynchronous stream
+resolution from replacing newer media and attributing it to the newer channel.
+Demo, guide focus, and preview paths never enter the controller.
 
 Only engine-confirmed advancing media in an active application counts. Starting,
 buffering, pause, app inactivity or background, recovery delay, failure, stop,

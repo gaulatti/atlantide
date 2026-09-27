@@ -133,6 +133,18 @@ final class CelestiAppModel: ObservableObject {
         self.playerController.onChannelViewingPlaybackChanged = { [weak self] event in
             self?.channelViewingRuntime?.receive(event)
         }
+        self.quadPlayerController.onViewingActivityChanged = { [weak self] quadrant, channelID, state in
+            self?.channelViewingRuntime?.receiveQuad(
+                ChannelViewingPlaybackEvent(source: .remoteCommand, channelID: channelID, state: state),
+                quadrant: quadrant.rawValue
+            )
+        }
+        self.emergencyPlayerController.onViewingActivityChanged = { [weak self] slot, channelID, state in
+            self?.channelViewingRuntime?.receiveEmergency(
+                ChannelViewingPlaybackEvent(source: .remoteCommand, channelID: channelID, state: state),
+                slot: slot
+            )
+        }
         self.playerController.onDvrStateChanged = { [weak self] dvrAction in
             guard let self else { return }
             if let dvrAction {
