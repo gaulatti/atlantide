@@ -31,6 +31,19 @@ enum PlaybackMediumPresentationPolicy {
     }
 }
 
+struct AutomaticAudioTrackConfirmation {
+    private(set) var consecutiveAudioOnlySamples = 0
+
+    mutating func observe(hasVideo: Bool, hasAudio: Bool) -> Bool {
+        if hasVideo || !hasAudio {
+            consecutiveAudioOnlySamples = 0
+            return false
+        }
+        consecutiveAudioOnlySamples += 1
+        return consecutiveAudioOnlySamples >= 3
+    }
+}
+
 enum PlaybackIdleTimerState {
     case inactive
     case playing
