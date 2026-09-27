@@ -1389,7 +1389,15 @@ final class PlayerController: NSObject, ObservableObject {
 
         if isUsingKSPlayer {
             let state = ksCoordinator?.state ?? .initialized
-            let currentTime = ksCoordinator?.playerLayer?.player.currentPlaybackTime ?? 0
+            let mediaPlayer = ksCoordinator?.playerLayer?.player
+            let currentTime = mediaPlayer?.currentPlaybackTime ?? 0
+            presentation.isAudioOnly = PlaybackMediumPresentationPolicy.ksPlayerAudioOnly(
+                medium: currentMedium,
+                videoTrackCount: mediaPlayer?.tracks(mediaType: .video).count ?? 0,
+                audioTrackCount: mediaPlayer?.tracks(mediaType: .audio).count ?? 0,
+                hasVideoSize: (mediaPlayer?.naturalSize.width ?? 0) > 0,
+                previous: presentation.isAudioOnly
+            )
             let nowBuffering = !(state == .bufferFinished || currentTime > 0)
             if lastTelemetryBuffering != nowBuffering {
                 lastTelemetryBuffering = nowBuffering

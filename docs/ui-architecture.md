@@ -62,6 +62,11 @@ as playback starts, including while the stream resolver is loading. The pane
 retains the medium through restart, recovery, offline probes, and emergency
 carousel rotation; track discovery cannot replace an explicit radio or
 television designation. Automatic panes continue to use detected media.
+Remote single streams using KSPlayer make the same presentation decision from
+the player reports: a confirmed audio track with no video shows radio
+now-playing, while a video track or video size shows the video surface. Until
+tracks are known, the current presentation remains stable. Explicit medium
+always takes precedence.
 
 While the on-device live player confirms that the selected channel is playing
 and the app is active, Atlantide disables the tvOS idle timer so the TV keeps
