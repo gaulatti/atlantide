@@ -222,6 +222,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     var onViewingActivityChanged: ((String, ChannelViewingPlaybackState) -> Void)?
 
     private var originalURL: URL?
+    private var currentMedium: CelestiChannelMedium = .automatic
     var currentURL: URL?
     private var currentM3U8File: URL?
     private var updateTask: Task<Void, Never>?
@@ -268,6 +269,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         name: String?,
         logoURLString: String? = nil,
         channelId: String? = nil,
+        medium: CelestiChannelMedium,
         preserveRecoveryState: Bool = false,
         forceRestart: Bool = false
     ) async {
@@ -310,13 +312,14 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         }
         recoveryAttempt = 0
         originalURL = inputURL
+        currentMedium = medium
         currentChannelId = channelId
         streamName = name ?? inputURL.lastPathComponent
         logoURL = logoURLString.flatMap(URL.init(string:))
         isActive = true
         isBuffering = true
         isFailed = false
-        isAudioOnly = false
+        isAudioOnly = medium == .radio
 
         let resolved = await StreamResolver().resolve(url: inputURL)
         guard generation == playbackGeneration else { return }
@@ -325,7 +328,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .hasPrefix("audio/") == true
-        isAudioOnly = explicitlyAudioOnly
+        isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
+            medium: medium,
+            contentTypeIsAudio: explicitlyAudioOnly,
+            hasVideo: false
+        )
 
         if resolved.contentType == "video/mp2t" || resolved.contentType == "rtmp" || resolved.contentType?.contains("dash+xml") == true || urlString.contains(".mpd") {
             playWithKSPlayer(url: resolved.url, contentType: resolved.contentType)
@@ -378,7 +385,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 let (videoTracks, audioTracks) = try await (videoTracksResult, audioTracksResult)
                 guard self.avPlayer.currentItem === item else { return }
                 if !videoTracks.isEmpty {
-                    self.isAudioOnly = false
+                    self.isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
+                        medium: self.currentMedium,
+                        contentTypeIsAudio: self.explicitlyAudioOnly,
+                        hasVideo: true
+                    )
                 }
                 if let audioTrack = audioTracks.first {
                     self.audioPeakMonitor.attach(to: item, track: audioTrack)
@@ -505,6 +516,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         audioPeakMonitor.reset()
         currentURL = nil
         originalURL = nil
+        currentMedium = .automatic
         currentChannelId = nil
         logoURL = nil
 
@@ -542,12 +554,14 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let name = streamName
         let logo = logoURL?.absoluteString
         let channelId = currentChannelId
+        let medium = currentMedium
         Task {
             await play(
                 urlString: url.absoluteString,
                 name: name,
                 logoURLString: logo,
                 channelId: channelId,
+                medium: medium,
                 forceRestart: true
             )
         }
@@ -667,11 +681,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         }
 
         let item = avPlayer.currentItem
-        if item?.presentationSize != .zero {
-            isAudioOnly = false
-        } else if explicitlyAudioOnly {
-            isAudioOnly = true
-        }
+        isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
+            medium: currentMedium,
+            contentTypeIsAudio: explicitlyAudioOnly,
+            hasVideo: item.map { $0.presentationSize != .zero } ?? false
+        )
         let wasBuffering = isBuffering
         isBuffering = avPlayer.timeControlStatus != .playing
         if wasBuffering != isBuffering {
@@ -715,7 +729,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let audioTracks = mediaPlayer.tracks(mediaType: .audio)
         // Wait until the demuxer has exposed at least one track before deciding.
         if !videoTracks.isEmpty || !audioTracks.isEmpty {
-            isAudioOnly = videoTracks.isEmpty
+            isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
+                medium: currentMedium,
+                contentTypeIsAudio: explicitlyAudioOnly || videoTracks.isEmpty,
+                hasVideo: !videoTracks.isEmpty
+            )
         }
     }
 
@@ -929,11 +947,13 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             let name = streamName
             let logo = logoURL?.absoluteString
             let channelId = currentChannelId
+            let medium = currentMedium
             await play(
                 urlString: url.absoluteString,
                 name: name,
                 logoURLString: logo,
                 channelId: channelId,
+                medium: medium,
                 preserveRecoveryState: true
             )
             recoveryAttempt = nextAttempt
@@ -975,6 +995,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let name = streamName
         let logo = logoURL?.absoluteString
         let channelId = currentChannelId
+        let medium = currentMedium
         offlineProbeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self else { return }
@@ -984,6 +1005,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 name: name,
                 logoURLString: logo,
                 channelId: channelId,
+                medium: medium,
                 preserveRecoveryState: true
             )
         }
@@ -1093,14 +1115,16 @@ final class QuadPlayerController: ObservableObject {
         name: String?,
         logoURLString: String? = nil,
         channelId: String? = nil,
-        quadrant: Quadrant
+        quadrant: Quadrant,
+        medium: CelestiChannelMedium
     ) async {
         isActive = true
         await player(for: quadrant).play(
             urlString: urlString,
             name: name,
             logoURLString: logoURLString,
-            channelId: channelId
+            channelId: channelId,
+            medium: medium
         )
         applyVolumes()
     }

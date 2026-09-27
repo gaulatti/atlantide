@@ -525,7 +525,8 @@ final class CelestiAppModel: ObservableObject {
                     channelId: command.channelId,
                     urlString: url,
                     name: command.name ?? command.title,
-                    logoURLString: command.logo
+                    logoURLString: command.logo,
+                    medium: command.medium ?? .automatic
                 )
             } else if requestedLayout == .quad {
                 guard let quadrant = Quadrant.from(command.quadrant) else {
@@ -540,7 +541,8 @@ final class CelestiAppModel: ObservableObject {
                     name: command.name ?? command.title,
                     logoURLString: command.logo,
                     channelId: command.channelId,
-                    quadrant: quadrant
+                    quadrant: quadrant,
+                    medium: command.medium ?? .automatic
                 )
             } else {
                 layoutMode = .single
@@ -643,7 +645,8 @@ final class CelestiAppModel: ObservableObject {
                 name: command.name ?? command.title,
                 logoURLString: command.logo,
                 channelId: command.channelId,
-                quadrant: quadrant
+                quadrant: quadrant,
+                medium: command.medium ?? .automatic
             )
         case "quad_stop":
         // Not sent by Mattone and not handled by the Android TV client (gaulatti/atlantide#31): a legacy

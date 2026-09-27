@@ -1,5 +1,19 @@
 import Foundation
 
+enum PlaybackMediumPresentationPolicy {
+    static func isAudioOnly(
+        medium: CelestiChannelMedium,
+        contentTypeIsAudio: Bool,
+        hasVideo: Bool
+    ) -> Bool {
+        switch medium {
+        case .radio: true
+        case .television: false
+        case .automatic: !hasVideo && contentTypeIsAudio
+        }
+    }
+}
+
 enum PlaybackIdleTimerState {
     case inactive
     case playing
