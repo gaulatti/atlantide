@@ -584,10 +584,80 @@ nonisolated enum ChannelViewingPlaybackState: Equatable, Sendable {
     case stopped
 }
 
+nonisolated struct AdvancingPlaybackDetector: Sendable {
+    private var lastPosition: TimeInterval?
+    private var lastAdvanceAt: TimeInterval?
+
+    mutating func state(
+        position: TimeInterval,
+        claimsToBePlaying: Bool,
+        now: TimeInterval
+    ) -> ChannelViewingPlaybackState {
+        guard claimsToBePlaying, position.isFinite, position >= 0 else {
+            lastPosition = nil
+            lastAdvanceAt = nil
+            return .buffering
+        }
+        if let lastPosition, position > lastPosition + 0.05 {
+            lastAdvanceAt = now
+        } else if let lastPosition, position < lastPosition {
+            lastAdvanceAt = nil
+        }
+        self.lastPosition = position
+        guard let lastAdvanceAt, now - lastAdvanceAt <= 2 else { return .buffering }
+        return .playing
+    }
+
+    mutating func reset() {
+        lastPosition = nil
+        lastAdvanceAt = nil
+    }
+}
+
 nonisolated struct ChannelViewingPlaybackEvent: Equatable, Sendable {
     let source: ChannelViewingPlaybackSource
     let channelID: String
     let state: ChannelViewingPlaybackState
+}
+
+nonisolated struct ChannelViewingChannelState: Equatable, Sendable {
+    let channelID: String
+    let state: ChannelViewingPlaybackState
+}
+
+nonisolated struct ChannelViewingSlotAggregator {
+    private var slots: [String: ChannelViewingPlaybackEvent] = [:]
+    private var channelStates: [String: ChannelViewingPlaybackState] = [:]
+
+    mutating func receive(_ event: ChannelViewingPlaybackEvent, slot: String) -> [ChannelViewingChannelState] {
+        let previousChannel = slots[slot]?.channelID
+        if event.state == .stopped || event.state == .failed {
+            slots.removeValue(forKey: slot)
+        } else {
+            slots[slot] = event
+        }
+
+        return Set([previousChannel, event.channelID].compactMap { $0 }).sorted().compactMap { channelID in
+            let states = slots.values.filter { $0.channelID == channelID }.map(\.state)
+            let state: ChannelViewingPlaybackState
+            if states.contains(.playing) {
+                state = .playing
+            } else if states.contains(.buffering) || states.contains(.starting) {
+                state = .buffering
+            } else if states.contains(.paused) {
+                state = .paused
+            } else {
+                state = .stopped
+            }
+            guard channelStates[channelID] != state else { return nil }
+            if state == .stopped {
+                channelStates.removeValue(forKey: channelID)
+            } else {
+                channelStates[channelID] = state
+            }
+            return ChannelViewingChannelState(channelID: channelID, state: state)
+        }
+    }
 }
 
 nonisolated enum ChannelViewingDiagnostic: Equatable, Sendable {

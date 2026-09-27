@@ -22,6 +22,7 @@ struct EmergencyChannel: Equatable, Identifiable {
 
 @MainActor
 final class EmergencyPlayerController: ObservableObject {
+    var onViewingActivityChanged: ((Int, String, ChannelViewingPlaybackState) -> Void)?
     @Published private(set) var viewportPlayers: [QuadrantPlayer]
     @Published private(set) var visibleSlots: [Int?] = [nil, nil]
     @Published private(set) var healthySlots: [Int] = []
@@ -116,6 +117,7 @@ final class EmergencyPlayerController: ObservableObject {
     }
 
     func stopAll() {
+        viewportPlayers.forEach { $0.stop() }
         channels.removeAll()
         channelOrder.removeAll()
         probePlayers.values.forEach { $0.stop() }
@@ -126,7 +128,6 @@ final class EmergencyPlayerController: ObservableObject {
         healthySlots = []
         assignedSlots = []
         focusedViewport = 0
-        viewportPlayers.forEach { $0.stop() }
         updateIdleTimer()
     }
 
@@ -204,8 +205,8 @@ final class EmergencyPlayerController: ObservableObject {
     private func renderWindow() async {
         let healthy = healthyChannels()
         guard !healthy.isEmpty else {
-            visibleSlots = [nil, nil]
             viewportPlayers.forEach { $0.stop() }
+            visibleSlots = [nil, nil]
             windowStartSlot = nil
             focusedViewport = 0
             publishCarouselState()
@@ -249,20 +250,17 @@ final class EmergencyPlayerController: ObservableObject {
 
     private func bindCallbacks() {
         for player in viewportPlayers {
-            player.onPlaybackFailure = { [weak self, weak player] reason in
-                guard let self, let player else { return }
-                self.handlePlaybackFailure(player: player, reason: reason)
-            }
-            player.onStableRecovery = { [weak self, weak player] in
-                guard let self, let player else { return }
-                self.handleStableRecovery(player: player)
-            }
+            bindCallbacks(for: player)
         }
     }
 
     private func handlePlaybackFailure(player: QuadrantPlayer, reason: String?) {
         guard let viewport = viewportPlayers.firstIndex(where: { $0 === player }),
               let failedSlot = visibleSlots[viewport] else { return }
+
+        if let channelID = channels[failedSlot]?.channelId {
+            onViewingActivityChanged?(failedSlot, channelID, .stopped)
+        }
 
         let failureReason = reason ?? "unknown"
         offlineSlots.insert(failedSlot)
@@ -293,6 +291,12 @@ final class EmergencyPlayerController: ObservableObject {
     }
 
     private func bindCallbacks(for player: QuadrantPlayer) {
+        player.onViewingActivityChanged = { [weak self, weak player] channelID, state in
+            guard let self, let player,
+                  let viewport = self.viewportPlayers.firstIndex(where: { $0 === player }),
+                  let slot = self.visibleSlots[viewport] else { return }
+            self.onViewingActivityChanged?(slot, channelID, state)
+        }
         player.onPlaybackFailure = { [weak self, weak player] reason in
             guard let self, let player else { return }
             self.handlePlaybackFailure(player: player, reason: reason)

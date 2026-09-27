@@ -2,6 +2,82 @@ import Foundation
 import Testing
 @testable import AtlantideResilience
 
+@Test func advancingDetectorCountsOnlyMovingMediaAndClosesOnBuffering() {
+    var detector = AdvancingPlaybackDetector()
+    #expect(detector.state(position: 0, claimsToBePlaying: true, now: 0) == .buffering)
+    #expect(detector.state(position: 1, claimsToBePlaying: true, now: 1) == .playing)
+    #expect(detector.state(position: 1, claimsToBePlaying: true, now: 4) == .buffering)
+    #expect(detector.state(position: 2, claimsToBePlaying: true, now: 5) == .playing)
+    #expect(detector.state(position: 2, claimsToBePlaying: false, now: 6) == .buffering)
+    #expect(detector.state(position: 2, claimsToBePlaying: true, now: 7) == .buffering)
+}
+
+@Test func concurrentPanesCountEachDistinctChannelOnceAcrossMuteAndPaneHandoff() {
+    var aggregator = ChannelViewingSlotAggregator()
+    func event(_ channel: String, _ state: ChannelViewingPlaybackState) -> ChannelViewingPlaybackEvent {
+        ChannelViewingPlaybackEvent(source: .remoteCommand, channelID: channel, state: state)
+    }
+
+    #expect(aggregator.receive(event("a", .playing), slot: "quad:0") == [
+        ChannelViewingChannelState(channelID: "a", state: .playing)
+    ])
+    #expect(aggregator.receive(event("a", .playing), slot: "quad:1").isEmpty)
+    #expect(aggregator.receive(event("b", .playing), slot: "quad:2") == [
+        ChannelViewingChannelState(channelID: "b", state: .playing)
+    ])
+    #expect(aggregator.receive(event("a", .buffering), slot: "quad:0").isEmpty)
+    #expect(aggregator.receive(event("a", .stopped), slot: "quad:1") == [
+        ChannelViewingChannelState(channelID: "a", state: .buffering)
+    ])
+    #expect(aggregator.receive(event("a", .playing), slot: "quad:0") == [
+        ChannelViewingChannelState(channelID: "a", state: .playing)
+    ])
+    #expect(aggregator.receive(event("a", .stopped), slot: "quad:0") == [
+        ChannelViewingChannelState(channelID: "a", state: .stopped)
+    ])
+    #expect(aggregator.receive(event("b", .stopped), slot: "quad:2") == [
+        ChannelViewingChannelState(channelID: "b", state: .stopped)
+    ])
+}
+
+@Test func overlappingPanesPersistOneIntervalPerDistinctChannel() async throws {
+    let harness = try ViewingHistoryHarness()
+    let second = ActiveChannelViewingAccumulator(
+        outbox: harness.outbox,
+        monotonicClock: harness.monotonic,
+        wallClock: harness.wall
+    )
+    var aggregator = ChannelViewingSlotAggregator()
+    func event(_ channel: String, _ state: ChannelViewingPlaybackState) -> ChannelViewingPlaybackEvent {
+        ChannelViewingPlaybackEvent(source: .remoteCommand, channelID: channel, state: state)
+    }
+
+    for change in aggregator.receive(event("a", .playing), slot: "quad:0") {
+        try await harness.accumulator.transition(to: .playing(channelId: change.channelID))
+    }
+    for change in aggregator.receive(event("b", .playing), slot: "quad:1") {
+        try await second.transition(to: .playing(channelId: change.channelID))
+    }
+    harness.monotonic.advance(by: 10)
+    #expect(aggregator.receive(event("a", .playing), slot: "quad:2").isEmpty)
+    harness.monotonic.advance(by: 10)
+    #expect(aggregator.receive(event("a", .stopped), slot: "quad:0").isEmpty)
+    harness.monotonic.advance(by: 10)
+    for change in aggregator.receive(event("b", .stopped), slot: "quad:1") {
+        #expect(change.state == .stopped)
+        try await second.transition(to: .stopped)
+    }
+    harness.monotonic.advance(by: 10)
+    for change in aggregator.receive(event("a", .stopped), slot: "quad:2") {
+        #expect(change.state == .stopped)
+        try await harness.accumulator.transition(to: .stopped)
+    }
+
+    let totals = Dictionary(grouping: await harness.outbox.snapshot.map(\.segment), by: \.channelId)
+        .mapValues { $0.map(\.activeSeconds).reduce(0, +) }
+    #expect(totals == ["a": 40, "b": 30])
+}
+
 @Test func accumulatorCheckpointsAtSixtySecondsAndFlushesWholeSecondRemainder() async throws {
     let harness = try ViewingHistoryHarness()
 
