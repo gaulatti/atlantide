@@ -12,6 +12,23 @@ enum PlaybackMediumPresentationPolicy {
         case .automatic: !hasVideo && contentTypeIsAudio
         }
     }
+
+    static func ksPlayerAudioOnly(
+        medium: CelestiChannelMedium,
+        videoTrackCount: Int,
+        audioTrackCount: Int,
+        hasVideoSize: Bool,
+        previous: Bool
+    ) -> Bool {
+        switch medium {
+        case .radio: return true
+        case .television: return false
+        case .automatic:
+            if videoTrackCount > 0 || hasVideoSize { return false }
+            if audioTrackCount > 0 { return true }
+            return previous
+        }
+    }
 }
 
 enum PlaybackIdleTimerState {

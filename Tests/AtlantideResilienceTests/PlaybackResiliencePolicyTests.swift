@@ -22,6 +22,17 @@ import Testing
     #expect(!PlaybackMediumPresentationPolicy.isAudioOnly(medium: .automatic, contentTypeIsAudio: false, hasVideo: false))
 }
 
+@Test func remoteSingleKSPlayerMapsTrackDiscoveryToRadioPresentation() {
+    let classify = PlaybackMediumPresentationPolicy.ksPlayerAudioOnly
+    #expect(!classify(.automatic, 0, 0, false, false))
+    #expect(classify(.automatic, 0, 1, false, false))
+    #expect(classify(.automatic, 0, 0, false, true))
+    #expect(!classify(.automatic, 1, 1, false, true))
+    #expect(!classify(.automatic, 0, 1, true, true))
+    #expect(classify(.radio, 1, 1, true, false))
+    #expect(!classify(.television, 0, 1, false, true))
+}
+
 @Test func bufferProfilesMatchAcceptedLowAndHighMemoryPolicy() {
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 2_048) == profile(15, 30, 2_048, true))
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 4_096) == profile(20, 45, 4_096, false))
