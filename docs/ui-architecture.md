@@ -6,7 +6,7 @@ does not own a parallel visual or remote-interaction system. Sabella owns both
 presentation and decoder selection for authenticated live-channel playback.
 
 All tvOS presentation is composed from the remote Sabella Swift package pinned
-to exact revision `6a0a5e5db876958d7fae3e4c03d9539566431c11`. No sibling checkout
+to exact revision `022c515e059d3e2c29ceb5c64815b685ec033d21`. No sibling checkout
 or moving branch participates in clean, CI, or internal builds. This includes
 typography, palette, brand assets, ambient and panel surfaces, registration and
 standby, loading and failure states, radio
@@ -30,7 +30,8 @@ that group's Mattone order. Reaching the end of the loaded page asks Mattone
 for the next page before tuning. Channel + on the true final channel wraps to
 001; Channel - on 001 loads any remaining pages before wrapping to the true
 final channel. The guide's Up / Down focus wraps at those same ends without
-tuning, while Select still tunes independently. Channel + / Channel - also tune while
+tuning, scrolling the opposite end into view before moving focus. Select still
+tunes independently. Channel + / Channel - also tune while
 the guide is open and then return to full-screen playback. The guide displays
 the first numbered channel at the bottom and higher numbers above, while
 keeping Mattone's underlying lineup order and page boundaries intact.
