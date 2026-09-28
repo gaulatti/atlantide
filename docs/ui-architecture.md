@@ -6,7 +6,7 @@ does not own a parallel visual or remote-interaction system. Sabella owns both
 presentation and decoder selection for authenticated live-channel playback.
 
 All tvOS presentation is composed from the remote Sabella Swift package pinned
-to exact revision `32a15d6f340de919ff2c3e7413da10663360a826`. No sibling checkout
+to exact revision `409d859e159f008bd5eaf7499dd110e4f6b72843`. No sibling checkout
 or moving branch participates in clean, CI, or internal builds. This includes
 typography, palette, brand assets, ambient and panel surfaces, registration and
 standby, loading and failure states, radio
@@ -22,13 +22,16 @@ row rather than resetting to the first item. Linear playback remains
 remote gestures. `SabellaTVLivePlayer` also routes raw MPEG-TS, DASH, and RTMP
 through Sabella's pinned KSPlayer/FFmpeg path, while HLS remains on AVPlayer;
 Atlantide supplies the authoritative stream URL without substituting a player.
-During full-screen playback entered through a channel group, the connected
-remote's Channel + / Channel - commands tune the next / previous channel in
+During playback entered through a channel group, the connected remote's
+Channel + / Channel - commands tune the next / previous channel in
 that group's Mattone order. Reaching the end of the loaded page asks Mattone
 for the next page before tuning. The existing guide still handles Up / Down
-focus and Select-to-tune independently. It displays the first numbered channel
-at the bottom and higher numbers above, while keeping Mattone's underlying
-lineup order and page boundaries intact.
+focus and Select-to-tune independently. Channel + / Channel - also tune while
+the guide is open and then return to full-screen playback. The guide displays
+the first numbered channel at the bottom and higher numbers above, while
+keeping Mattone's underlying lineup order and page boundaries intact.
+After tuning, Sabella briefly identifies the selected channel by its numbered
+position and name for five seconds, then clears the notice from playback.
 
 Sabella also owns the header focus route, user/settings button, settings action
 presentation, focus geometry, and live status badge. Atlantide supplies only

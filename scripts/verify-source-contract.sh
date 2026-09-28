@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 project="$root/celesti.xcodeproj/project.pbxproj"
 resolved="$root/celesti.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
-expected_sabella_revision="32a15d6f340de919ff2c3e7413da10663360a826"
+expected_sabella_revision="409d859e159f008bd5eaf7499dd110e4f6b72843"
 
 if grep -Eq 'XCLocalSwiftPackageReference|relativePath = .*sabella' "$project"; then
   echo "Atlantide must not depend on a local Sabella checkout" >&2
