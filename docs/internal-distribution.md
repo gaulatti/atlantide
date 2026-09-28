@@ -9,7 +9,7 @@ reviewed source SHA and the production Mattone API.
 
 The Xcode project resolves Sabella from
 `https://github.com/gaulatti/sabella.git` at exact revision
-`bcddebf150162589022691afcd2ef67dbb90f69f`. The committed
+`6a0a5e5db876958d7fae3e4c03d9539566431c11`. The committed
 `Package.resolved` locks Sabella and its transitive media dependencies.
 Machine-specific `workspace-state.json` files are ignored and must never be
 committed. `scripts/verify-source-contract.sh` fails if the project returns to
