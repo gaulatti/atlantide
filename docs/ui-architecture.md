@@ -6,7 +6,7 @@ does not own a parallel visual or remote-interaction system. Sabella owns both
 presentation and decoder selection for authenticated live-channel playback.
 
 All tvOS presentation is composed from the remote Sabella Swift package pinned
-to exact revision `409d859e159f008bd5eaf7499dd110e4f6b72843`. No sibling checkout
+to exact revision `bcddebf150162589022691afcd2ef67dbb90f69f`. No sibling checkout
 or moving branch participates in clean, CI, or internal builds. This includes
 typography, palette, brand assets, ambient and panel surfaces, registration and
 standby, loading and failure states, radio
@@ -16,7 +16,9 @@ The authenticated browser is `SabellaTVChannelHome`; it owns the pinned Sabella
 navigation header, the editorial Home surface, and the complete multi-row
 Channels directory. Atlantide persists the current browse page and focused
 group, so leaving `SabellaTVLivePlayer` restores the exact group tile and grid
-row rather than resetting to the first item. Linear playback remains
+row rather than resetting to the first item. Sabella ignores transient focus
+on the first tile while that saved group is scrolled into view and refocused.
+Linear playback remains
 `SabellaTVLivePlayer`; remote single-stream playback is
 `SabellaTVSinglePlayback`. Those components own focus, guide transitions, and
 remote gestures. `SabellaTVLivePlayer` also routes raw MPEG-TS, DASH, and RTMP
