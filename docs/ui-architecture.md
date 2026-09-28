@@ -6,7 +6,7 @@ does not own a parallel visual or remote-interaction system. Sabella owns both
 presentation and decoder selection for authenticated live-channel playback.
 
 All tvOS presentation is composed from the remote Sabella Swift package pinned
-to exact revision `39093d503a6f5950c504855105cb7c3b6ab8c6f1`. No sibling checkout
+to exact revision `022c515e059d3e2c29ceb5c64815b685ec033d21`. No sibling checkout
 or moving branch participates in clean, CI, or internal builds. This includes
 typography, palette, brand assets, ambient and panel surfaces, registration and
 standby, loading and failure states, radio
@@ -16,12 +16,27 @@ The authenticated browser is `SabellaTVChannelHome`; it owns the pinned Sabella
 navigation header, the editorial Home surface, and the complete multi-row
 Channels directory. Atlantide persists the current browse page and focused
 group, so leaving `SabellaTVLivePlayer` restores the exact group tile and grid
-row rather than resetting to the first item. Linear playback remains
+row rather than resetting to the first item. Sabella ignores transient focus
+on the first tile while that saved group is scrolled into view and refocused.
+Linear playback remains
 `SabellaTVLivePlayer`; remote single-stream playback is
 `SabellaTVSinglePlayback`. Those components own focus, guide transitions, and
 remote gestures. `SabellaTVLivePlayer` also routes raw MPEG-TS, DASH, and RTMP
 through Sabella's pinned KSPlayer/FFmpeg path, while HLS remains on AVPlayer;
 Atlantide supplies the authoritative stream URL without substituting a player.
+During playback entered through a channel group, the connected remote's
+Channel + / Channel - commands tune the next / previous channel in
+that group's Mattone order. Reaching the end of the loaded page asks Mattone
+for the next page before tuning. Channel + on the true final channel wraps to
+001; Channel - on 001 loads any remaining pages before wrapping to the true
+final channel. The guide's Up / Down focus wraps at those same ends without
+tuning, scrolling the opposite end into view before moving focus. Select still
+tunes independently. Channel + / Channel - also tune while
+the guide is open and then return to full-screen playback. The guide displays
+the first numbered channel at the bottom and higher numbers above, while
+keeping Mattone's underlying lineup order and page boundaries intact.
+After tuning, Sabella briefly identifies the selected channel by its numbered
+position and name for five seconds, then clears the notice from playback.
 
 Sabella also owns the header focus route, user/settings button, settings action
 presentation, focus geometry, and live status badge. Atlantide supplies only
