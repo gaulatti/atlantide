@@ -6,7 +6,7 @@ does not own a parallel visual or remote-interaction system. Sabella owns both
 presentation and decoder selection for authenticated live-channel playback.
 
 All tvOS presentation is composed from the remote Sabella Swift package pinned
-to exact revision `d99fcd76ad5e146ef5e2334e10b1b681b5387060`. No sibling checkout
+to exact revision `f30d6630201a0020ac73f873818cb74cecd60df4`. No sibling checkout
 or moving branch participates in clean, CI, or internal builds. This includes
 typography, palette, brand assets, ambient and panel surfaces, registration and
 standby, loading and failure states, radio
@@ -26,7 +26,9 @@ During full-screen playback entered through a channel group, the connected
 remote's Channel + / Channel - commands tune the next / previous channel in
 that group's Mattone order. Reaching the end of the loaded page asks Mattone
 for the next page before tuning. The existing guide still handles Up / Down
-focus and Select-to-tune independently.
+focus and Select-to-tune independently. It displays the first numbered channel
+at the bottom and higher numbers above, while keeping Mattone's underlying
+lineup order and page boundaries intact.
 
 Sabella also owns the header focus route, user/settings button, settings action
 presentation, focus geometry, and live status badge. Atlantide supplies only

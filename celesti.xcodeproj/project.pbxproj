@@ -369,7 +369,7 @@
 			repositoryURL = "https://github.com/gaulatti/sabella.git";
 			requirement = {
 				kind = revision;
-				revision = d99fcd76ad5e146ef5e2334e10b1b681b5387060;
+				revision = f30d6630201a0020ac73f873818cb74cecd60df4;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
