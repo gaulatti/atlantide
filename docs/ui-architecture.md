@@ -6,7 +6,7 @@ does not own a parallel visual or remote-interaction system. Sabella owns both
 presentation and decoder selection for authenticated live-channel playback.
 
 All tvOS presentation is composed from the remote Sabella Swift package pinned
-to exact revision `022c515e059d3e2c29ceb5c64815b685ec033d21`. No sibling checkout
+to exact revision `f5df8d0422939573b61030e82abe4802aa7a26a8`. No sibling checkout
 or moving branch participates in clean, CI, or internal builds. This includes
 typography, palette, brand assets, ambient and panel surfaces, registration and
 standby, loading and failure states, radio
@@ -70,6 +70,26 @@ Sabella: radio opts into audio-first now-playing and background audio,
 television remains video-first and suspends in the background, and only
 automatic may use ready-media detection. Names, categories, logos, file
 extensions, and URLs never determine the medium.
+
+Remote quad and emergency commands also carry that medium into each visible
+player. An explicit radio pane displays the Sabella audio test pattern as soon
+as playback starts, including while the stream resolver is loading. The pane
+retains the medium through restart, recovery, offline probes, and emergency
+carousel rotation; track discovery cannot replace an explicit radio or
+television designation. Automatic panes continue to use detected media.
+An automatic AVPlayer pane with an unknown MIME type switches to the radio
+test pattern after three consecutive samples show audio and no video. The
+ongoing 750 ms playback refresh observes the current item for its full lifetime,
+including when the initial asset inspection fails or tracks appear after its
+startup probe. Positive tracks from a completed asset inspection also remain
+item-scoped evidence when selected item tracks or video size lag. Unknown samples interrupt an unconfirmed streak but preserve an
+already confirmed radio presentation. Positive video evidence keeps or restores
+the video surface; replacing the playback item resets confirmation.
+Remote single streams using KSPlayer make the same presentation decision from
+the player reports: a confirmed audio track with no video shows radio
+now-playing, while a video track or video size shows the video surface. Until
+tracks are known, the current presentation remains stable. Explicit medium
+always takes precedence.
 
 While the on-device live player confirms that the selected channel is playing
 and the app is active, Atlantide disables the tvOS idle timer so the TV keeps

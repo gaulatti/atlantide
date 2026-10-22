@@ -515,7 +515,8 @@ final class CelestiAppModel: ObservableObject {
                     channelId: command.channelId,
                     urlString: url,
                     name: command.name ?? command.title,
-                    logoURLString: command.logo
+                    logoURLString: command.logo,
+                    medium: command.medium ?? .automatic
                 )
             } else if requestedLayout == .quad {
                 guard let quadrant = Quadrant.from(command.quadrant) else {
@@ -530,7 +531,8 @@ final class CelestiAppModel: ObservableObject {
                     name: command.name ?? command.title,
                     logoURLString: command.logo,
                     channelId: command.channelId,
-                    quadrant: quadrant
+                    quadrant: quadrant,
+                    medium: command.medium ?? .automatic
                 )
             } else {
                 layoutMode = .single
@@ -627,7 +629,8 @@ final class CelestiAppModel: ObservableObject {
                 name: command.name ?? command.title,
                 logoURLString: command.logo,
                 channelId: command.channelId,
-                quadrant: quadrant
+                quadrant: quadrant,
+                medium: command.medium ?? .automatic
             )
         case "quad_stop":
             guard let quadrant = Quadrant.from(command.quadrant) else {
@@ -1386,7 +1389,15 @@ final class PlayerController: NSObject, ObservableObject {
 
         if isUsingKSPlayer {
             let state = ksCoordinator?.state ?? .initialized
-            let currentTime = ksCoordinator?.playerLayer?.player.currentPlaybackTime ?? 0
+            let mediaPlayer = ksCoordinator?.playerLayer?.player
+            let currentTime = mediaPlayer?.currentPlaybackTime ?? 0
+            presentation.isAudioOnly = PlaybackMediumPresentationPolicy.ksPlayerAudioOnly(
+                medium: currentMedium,
+                videoTrackCount: mediaPlayer?.tracks(mediaType: .video).count ?? 0,
+                audioTrackCount: mediaPlayer?.tracks(mediaType: .audio).count ?? 0,
+                hasVideoSize: (mediaPlayer?.naturalSize.width ?? 0) > 0,
+                previous: presentation.isAudioOnly
+            )
             let nowBuffering = !(state == .bufferFinished || currentTime > 0)
             if lastTelemetryBuffering != nowBuffering {
                 lastTelemetryBuffering = nowBuffering

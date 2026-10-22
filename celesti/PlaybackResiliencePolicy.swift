@@ -1,5 +1,61 @@
 import Foundation
 
+enum PlaybackMediumPresentationPolicy {
+    static func isAudioOnly(
+        medium: CelestiChannelMedium,
+        contentTypeIsAudio: Bool,
+        hasVideo: Bool
+    ) -> Bool {
+        switch medium {
+        case .radio: true
+        case .television: false
+        case .automatic: !hasVideo && contentTypeIsAudio
+        }
+    }
+
+    static func ksPlayerAudioOnly(
+        medium: CelestiChannelMedium,
+        videoTrackCount: Int,
+        audioTrackCount: Int,
+        hasVideoSize: Bool,
+        previous: Bool
+    ) -> Bool {
+        switch medium {
+        case .radio: return true
+        case .television: return false
+        case .automatic:
+            if videoTrackCount > 0 || hasVideoSize { return false }
+            if audioTrackCount > 0 { return true }
+            return previous
+        }
+    }
+}
+
+struct AutomaticAudioTrackConfirmation {
+    private(set) var consecutiveAudioOnlySamples = 0
+    private(set) var isAudioOnly = false
+    private var assetHasVideo = false
+    private var assetHasAudio = false
+
+    mutating func recordAssetTracks(hasVideo: Bool, hasAudio: Bool) {
+        assetHasVideo = assetHasVideo || hasVideo
+        assetHasAudio = assetHasAudio || hasAudio
+    }
+
+    mutating func observe(hasVideo: Bool, hasAudio: Bool) -> Bool {
+        if assetHasVideo || hasVideo {
+            consecutiveAudioOnlySamples = 0
+            isAudioOnly = false
+        } else if assetHasAudio || hasAudio {
+            consecutiveAudioOnlySamples = min(3, consecutiveAudioOnlySamples + 1)
+            if consecutiveAudioOnlySamples == 3 { isAudioOnly = true }
+        } else {
+            consecutiveAudioOnlySamples = 0
+        }
+        return isAudioOnly
+    }
+}
+
 enum PlaybackIdleTimerState {
     case inactive
     case playing
