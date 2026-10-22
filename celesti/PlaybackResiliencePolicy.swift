@@ -34,12 +34,19 @@ enum PlaybackMediumPresentationPolicy {
 struct AutomaticAudioTrackConfirmation {
     private(set) var consecutiveAudioOnlySamples = 0
     private(set) var isAudioOnly = false
+    private var assetHasVideo = false
+    private var assetHasAudio = false
+
+    mutating func recordAssetTracks(hasVideo: Bool, hasAudio: Bool) {
+        assetHasVideo = assetHasVideo || hasVideo
+        assetHasAudio = assetHasAudio || hasAudio
+    }
 
     mutating func observe(hasVideo: Bool, hasAudio: Bool) -> Bool {
-        if hasVideo {
+        if assetHasVideo || hasVideo {
             consecutiveAudioOnlySamples = 0
             isAudioOnly = false
-        } else if hasAudio {
+        } else if assetHasAudio || hasAudio {
             consecutiveAudioOnlySamples = min(3, consecutiveAudioOnlySamples + 1)
             if consecutiveAudioOnlySamples == 3 { isAudioOnly = true }
         } else {
