@@ -340,6 +340,10 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 async let audioTracksResult = asset.loadTracks(withMediaType: .audio)
                 let (videoTracks, audioTracks) = try await (videoTracksResult, audioTracksResult)
                 guard !Task.isCancelled, self.avPlayer.currentItem === item else { return }
+                self.automaticAudioConfirmation.recordAssetTracks(
+                    hasVideo: !videoTracks.isEmpty,
+                    hasAudio: !audioTracks.isEmpty
+                )
                 if let audioTrack = audioTracks.first {
                     self.audioPeakMonitor.attach(to: item, track: audioTrack)
                 } else {

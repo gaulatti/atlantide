@@ -77,6 +77,25 @@ import Testing
     #expect(!first)
 }
 
+@Test func automaticAVPlayerRetainsPositiveAssetEvidenceWhenItemTracksLag() {
+    var video = AutomaticAudioTrackConfirmation()
+    video.recordAssetTracks(hasVideo: true, hasAudio: true)
+    let videoPresentations = (0..<4).map { _ in video.observe(hasVideo: false, hasAudio: true) }
+    #expect(videoPresentations == [false, false, false, false])
+
+    var audio = AutomaticAudioTrackConfirmation()
+    audio.recordAssetTracks(hasVideo: false, hasAudio: true)
+    let audioPresentations = (0..<3).map { _ in audio.observe(hasVideo: false, hasAudio: false) }
+    #expect(audioPresentations == [false, false, true])
+    audio.recordAssetTracks(hasVideo: true, hasAudio: true)
+    let corrected = audio.observe(hasVideo: false, hasAudio: false)
+    #expect(!corrected)
+
+    audio = AutomaticAudioTrackConfirmation()
+    let reset = audio.observe(hasVideo: false, hasAudio: false)
+    #expect(!reset)
+}
+
 @Test func bufferProfilesMatchAcceptedLowAndHighMemoryPolicy() {
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 2_048) == profile(15, 30, 2_048, true))
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 4_096) == profile(20, 45, 4_096, false))

@@ -81,7 +81,8 @@ An automatic AVPlayer pane with an unknown MIME type switches to the radio
 test pattern after three consecutive samples show audio and no video. The
 ongoing 750 ms playback refresh observes the current item for its full lifetime,
 including when the initial asset inspection fails or tracks appear after its
-startup probe. Unknown samples interrupt an unconfirmed streak but preserve an
+startup probe. Positive tracks from a completed asset inspection also remain
+item-scoped evidence when selected item tracks or video size lag. Unknown samples interrupt an unconfirmed streak but preserve an
 already confirmed radio presentation. Positive video evidence keeps or restores
 the video surface; replacing the playback item resets confirmation.
 Remote single streams using KSPlayer make the same presentation decision from
