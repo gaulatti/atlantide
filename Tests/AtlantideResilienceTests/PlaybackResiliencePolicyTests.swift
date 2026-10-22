@@ -50,6 +50,33 @@ import Testing
     #expect(!firstAgain)
 }
 
+@Test func automaticAVPlayerConfirmsVeryLateAudioAndRetainsItUntilVideo() {
+    var confirmation = AutomaticAudioTrackConfirmation()
+    for _ in 0..<40 {
+        let unknown = confirmation.observe(hasVideo: false, hasAudio: false)
+        #expect(!unknown)
+    }
+    let samples = [
+        (false, true), (false, true), (false, true),
+        (false, false), (false, true), (true, true), (false, true),
+    ]
+    let presentations = samples.map { hasVideo, hasAudio in
+        confirmation.observe(hasVideo: hasVideo, hasAudio: hasAudio)
+    }
+    #expect(presentations == [false, false, true, true, true, false, false])
+}
+
+@Test func automaticAVPlayerResetsEvidenceForAnotherPlaybackItem() {
+    var confirmation = AutomaticAudioTrackConfirmation()
+    for _ in 0..<3 { _ = confirmation.observe(hasVideo: false, hasAudio: true) }
+    #expect(confirmation.isAudioOnly)
+    confirmation = AutomaticAudioTrackConfirmation()
+    #expect(!confirmation.isAudioOnly)
+    #expect(confirmation.consecutiveAudioOnlySamples == 0)
+    let first = confirmation.observe(hasVideo: false, hasAudio: true)
+    #expect(!first)
+}
+
 @Test func bufferProfilesMatchAcceptedLowAndHighMemoryPolicy() {
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 2_048) == profile(15, 30, 2_048, true))
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 4_096) == profile(20, 45, 4_096, false))

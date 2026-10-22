@@ -208,7 +208,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     private var updateTask: Task<Void, Never>?
     private var trackDetectionTask: Task<Void, Never>?
     private var explicitlyAudioOnly = false
-    private var confirmedAudioOnly = false
+    private var automaticAudioConfirmation = AutomaticAudioTrackConfirmation()
     private var errorObserver: NSObjectProtocol?
     private var endObserver: NSObjectProtocol?
     private let audioPeakMonitor = AudioPeakMonitor()
@@ -331,51 +331,28 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         avPlayer.isMuted = isMuted
         avPlayer.play()
 
-        // HLS can expose tracks after playback starts. An automatic stream
-        // needs three consecutive audio-only samples before showing radio.
+        // Peak attachment has a bounded startup probe. Presentation instead
+        // observes current item tracks throughout playback in refreshState().
         trackDetectionTask = Task { [weak self, weak item] in
             guard let self, let item else { return }
             do {
                 async let videoTracksResult = asset.loadTracks(withMediaType: .video)
                 async let audioTracksResult = asset.loadTracks(withMediaType: .audio)
                 let (videoTracks, audioTracks) = try await (videoTracksResult, audioTracksResult)
-                guard self.avPlayer.currentItem === item else { return }
-                var peakAttached = false
+                guard !Task.isCancelled, self.avPlayer.currentItem === item else { return }
                 if let audioTrack = audioTracks.first {
                     self.audioPeakMonitor.attach(to: item, track: audioTrack)
-                    peakAttached = true
-                }
-                var confirmation = AutomaticAudioTrackConfirmation()
-                var classificationComplete = self.currentMedium != .automatic || self.explicitlyAudioOnly
-                for sample in 0..<20 {
-                    guard !Task.isCancelled, self.avPlayer.currentItem === item else { return }
-                    let selectedTracks = item.tracks.compactMap(\.assetTrack)
-                    let hasVideo = !videoTracks.isEmpty
-                        || selectedTracks.contains(where: { $0.mediaType == .video })
-                        || item.presentationSize != .zero
-                    let hasAudio = !audioTracks.isEmpty
-                        || selectedTracks.contains(where: { $0.mediaType == .audio })
-                    if !peakAttached,
-                       let audioTrack = selectedTracks.first(where: { $0.mediaType == .audio }) {
-                        self.audioPeakMonitor.attach(to: item, track: audioTrack)
-                        peakAttached = true
+                } else {
+                    for _ in 0..<20 {
+                        try? await Task.sleep(for: .milliseconds(500))
+                        guard !Task.isCancelled, self.avPlayer.currentItem === item else { return }
+                        if let audioTrack = item.tracks
+                            .compactMap(\.assetTrack)
+                            .first(where: { $0.mediaType == .audio }) {
+                            self.audioPeakMonitor.attach(to: item, track: audioTrack)
+                            break
+                        }
                     }
-                    if hasVideo {
-                        self.confirmedAudioOnly = false
-                        self.isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
-                            medium: self.currentMedium,
-                            contentTypeIsAudio: self.explicitlyAudioOnly,
-                            hasVideo: true
-                        )
-                        classificationComplete = true
-                    } else if !classificationComplete,
-                              confirmation.observe(hasVideo: false, hasAudio: hasAudio) {
-                        self.confirmedAudioOnly = true
-                        self.isAudioOnly = true
-                        classificationComplete = true
-                    }
-                    if peakAttached && classificationComplete { break }
-                    if sample < 19 { try? await Task.sleep(for: .milliseconds(500)) }
                 }
                 quadLog.log("[\(self.quadrant.displayName)] asset video tracks=\(videoTracks.count)")
             } catch {
@@ -472,7 +449,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         isFailed = false
         isAudioOnly = false
         explicitlyAudioOnly = false
-        confirmedAudioOnly = false
+        automaticAudioConfirmation = AutomaticAudioTrackConfirmation()
         bufferingCandidateAt = nil
         bufferingTelemetryReported = false
         offlineProbeCount = 0
@@ -647,10 +624,13 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         }
 
         let item = avPlayer.currentItem
-        let hasVideo = item.map { $0.presentationSize != .zero
-            || $0.tracks.contains(where: { $0.assetTrack?.mediaType == .video })
-        } ?? false
-        if hasVideo { confirmedAudioOnly = false }
+        let tracks = item?.tracks.compactMap(\.assetTrack) ?? []
+        let hasVideo = (item?.presentationSize ?? .zero) != .zero
+            || tracks.contains(where: { $0.mediaType == .video })
+        let confirmedAudioOnly = automaticAudioConfirmation.observe(
+            hasVideo: hasVideo,
+            hasAudio: tracks.contains(where: { $0.mediaType == .audio })
+        )
         isAudioOnly = PlaybackMediumPresentationPolicy.isAudioOnly(
             medium: currentMedium,
             contentTypeIsAudio: explicitlyAudioOnly || confirmedAudioOnly,
