@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "base_branch": "main",
+  "readme": "README.md",
+  "repository_policy": "AGENTS.md",
+  "verification": [
+    [
+      "scripts/verify-source-contract.sh"
+    ],
+    [
+      "swift",
+      "test",
+      "--enable-code-coverage"
+    ],
+    [
+      "scripts/clouseau-coverage.sh"
+    ]
+  ],
+  "coverage": {
+    "format": "llvm",
+    "report": "coverage/llvm.json",
+    "source_directory": "celesti"
+  }
+}
