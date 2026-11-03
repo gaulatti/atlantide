@@ -23,7 +23,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/gaulatti/sabella.git",
       "state" : {
-        "revision" : "022c515e059d3e2c29ceb5c64815b685ec033d21"
+        "revision" : "f5df8d0422939573b61030e82abe4802aa7a26a8"
       }
     }
   ],

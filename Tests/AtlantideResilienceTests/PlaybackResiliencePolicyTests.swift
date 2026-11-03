@@ -2,6 +2,100 @@ import Foundation
 import Testing
 @testable import AtlantideResilience
 
+@Test func explicitRadioRemainsVisualizedAcrossDetectionAndRecoveryStates() {
+    for hasVideo in [false, true] {
+        for contentTypeIsAudio in [false, true] {
+            #expect(PlaybackMediumPresentationPolicy.isAudioOnly(
+                medium: .radio,
+                contentTypeIsAudio: contentTypeIsAudio,
+                hasVideo: hasVideo
+            ))
+            #expect(!PlaybackMediumPresentationPolicy.isAudioOnly(
+                medium: .television,
+                contentTypeIsAudio: contentTypeIsAudio,
+                hasVideo: hasVideo
+            ))
+        }
+    }
+    #expect(PlaybackMediumPresentationPolicy.isAudioOnly(medium: .automatic, contentTypeIsAudio: true, hasVideo: false))
+    #expect(!PlaybackMediumPresentationPolicy.isAudioOnly(medium: .automatic, contentTypeIsAudio: true, hasVideo: true))
+    #expect(!PlaybackMediumPresentationPolicy.isAudioOnly(medium: .automatic, contentTypeIsAudio: false, hasVideo: false))
+}
+
+@Test func remoteSingleKSPlayerMapsTrackDiscoveryToRadioPresentation() {
+    let classify = PlaybackMediumPresentationPolicy.ksPlayerAudioOnly
+    #expect(!classify(.automatic, 0, 0, false, false))
+    #expect(classify(.automatic, 0, 1, false, false))
+    #expect(classify(.automatic, 0, 0, false, true))
+    #expect(!classify(.automatic, 1, 1, false, true))
+    #expect(!classify(.automatic, 0, 1, true, true))
+    #expect(classify(.radio, 1, 1, true, false))
+    #expect(!classify(.television, 0, 1, false, true))
+}
+
+@Test func automaticAVPlayerRequiresRepeatedAudioOnlyEvidence() {
+    var confirmation = AutomaticAudioTrackConfirmation()
+    let first = confirmation.observe(hasVideo: false, hasAudio: true)
+    let second = confirmation.observe(hasVideo: false, hasAudio: true)
+    let third = confirmation.observe(hasVideo: false, hasAudio: true)
+    let video = confirmation.observe(hasVideo: true, hasAudio: true)
+    #expect(!first)
+    #expect(!second)
+    #expect(third)
+    #expect(!video)
+    #expect(confirmation.consecutiveAudioOnlySamples == 0)
+    let noTracks = confirmation.observe(hasVideo: false, hasAudio: false)
+    let firstAgain = confirmation.observe(hasVideo: false, hasAudio: true)
+    #expect(!noTracks)
+    #expect(!firstAgain)
+}
+
+@Test func automaticAVPlayerConfirmsVeryLateAudioAndRetainsItUntilVideo() {
+    var confirmation = AutomaticAudioTrackConfirmation()
+    for _ in 0..<40 {
+        let unknown = confirmation.observe(hasVideo: false, hasAudio: false)
+        #expect(!unknown)
+    }
+    let samples = [
+        (false, true), (false, true), (false, true),
+        (false, false), (false, true), (true, true), (false, true),
+    ]
+    let presentations = samples.map { hasVideo, hasAudio in
+        confirmation.observe(hasVideo: hasVideo, hasAudio: hasAudio)
+    }
+    #expect(presentations == [false, false, true, true, true, false, false])
+}
+
+@Test func automaticAVPlayerResetsEvidenceForAnotherPlaybackItem() {
+    var confirmation = AutomaticAudioTrackConfirmation()
+    for _ in 0..<3 { _ = confirmation.observe(hasVideo: false, hasAudio: true) }
+    #expect(confirmation.isAudioOnly)
+    confirmation = AutomaticAudioTrackConfirmation()
+    #expect(!confirmation.isAudioOnly)
+    #expect(confirmation.consecutiveAudioOnlySamples == 0)
+    let first = confirmation.observe(hasVideo: false, hasAudio: true)
+    #expect(!first)
+}
+
+@Test func automaticAVPlayerRetainsPositiveAssetEvidenceWhenItemTracksLag() {
+    var video = AutomaticAudioTrackConfirmation()
+    video.recordAssetTracks(hasVideo: true, hasAudio: true)
+    let videoPresentations = (0..<4).map { _ in video.observe(hasVideo: false, hasAudio: true) }
+    #expect(videoPresentations == [false, false, false, false])
+
+    var audio = AutomaticAudioTrackConfirmation()
+    audio.recordAssetTracks(hasVideo: false, hasAudio: true)
+    let audioPresentations = (0..<3).map { _ in audio.observe(hasVideo: false, hasAudio: false) }
+    #expect(audioPresentations == [false, false, true])
+    audio.recordAssetTracks(hasVideo: true, hasAudio: true)
+    let corrected = audio.observe(hasVideo: false, hasAudio: false)
+    #expect(!corrected)
+
+    audio = AutomaticAudioTrackConfirmation()
+    let reset = audio.observe(hasVideo: false, hasAudio: false)
+    #expect(!reset)
+}
+
 @Test func bufferProfilesMatchAcceptedLowAndHighMemoryPolicy() {
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 2_048) == profile(15, 30, 2_048, true))
     #expect(PlaybackBufferPolicy.profile(for: .single, physicalMemoryMB: 4_096) == profile(20, 45, 4_096, false))
