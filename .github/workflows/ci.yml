@@ -192,6 +192,14 @@ jobs:
             echo "sha=" >> "$GITHUB_OUTPUT"
             echo "No valid base revision for this event: the coverage baseline is skipped and the exact 100% gate applies."
           fi
+      - name: Place the coverage report where the recipe reads it
+        if: *verify-code
+        run: |
+          # The recipe's report path is relative to the workspace; the artifact lands in the runner temp.
+          src="$RUNNER_TEMP/swift-coverage/llvm.lcov"
+          test -f "$src" || { echo "::error::The unit job did not hand over $src"; exit 1; }
+          mkdir -p coverage
+          cp "$src" coverage/llvm.lcov
       - name: Select accepted configuration and recipe
         if: *verify-code
         env:

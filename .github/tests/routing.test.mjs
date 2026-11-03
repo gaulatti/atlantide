@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {readFileSync, writeFileSync, mkdtempSync, existsSync, symlinkSync, unlinkSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdtempSync, mkdirSync, existsSync, symlinkSync, unlinkSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -112,6 +112,42 @@ test('the baseline runs only with a base revision and the coverage gate receives
   assert.equal(workflow.jobs.verify.steps.filter(step => step.name === gate.name).length, 1);
   assert.deepEqual(workflow.jobs.unit.steps.filter(step => step.with?.['fetch-depth'] !== undefined).map(step => step.with['fetch-depth']), [0]);
   assert.equal(workflow.jobs.verify.steps.find(step => step.uses === 'actions/checkout@v4').with['fetch-depth'], 0);
+});
+
+test('the verify job places the lcov at the recipe report path before the coverage step reads it', () => {
+  const steps = workflow.jobs.verify.steps;
+  const recipe = JSON.parse(readFileSync(new URL('../../.clouseau-local.json', import.meta.url), 'utf8'));
+  assert.equal(recipe.coverage.length, 1);
+  const [part] = recipe.coverage;
+  const place = steps.findIndex(step => step.name === 'Place the coverage report where the recipe reads it');
+  const download = steps.findIndex(step => step.uses === 'actions/download-artifact@v4');
+  const checkout = steps.findIndex(step => step.uses === 'actions/checkout@v4');
+  const gate = steps.findIndex(step => step.name === 'Enforce 100% line and branch coverage');
+  assert.ok(checkout >= 0 && checkout < place && download >= 0 && download < place && place >= 0 && place < gate);
+  assert.equal(steps[place].if, steps[gate].if);
+  assert.match(steps[place].run, /test -f "\$src"/);
+  assert.match(steps[place].run, /src="\$RUNNER_TEMP\/swift-coverage\/llvm\.lcov"/);
+  const dir = mkdtempSync(join(tmpdir(), 'place-'));
+  const temp = join(dir, 'temp'); const workspace = join(dir, 'ws');
+  mkdirSync(join(temp, 'swift-coverage'), {recursive: true}); mkdirSync(workspace);
+  const run = () => spawnSync('bash', ['-c', steps[place].run], {cwd: workspace, env: {PATH: process.env.PATH, RUNNER_TEMP: temp}, encoding: 'utf8'});
+  const missing = run();
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stdout, /did not hand over/);
+  writeFileSync(join(temp, 'swift-coverage', 'llvm.lcov'), 'TN:\n');
+  assert.equal(run().status, 0);
+  assert.equal(readFileSync(join(workspace, part.report), 'utf8'), 'TN:\n');
+  // Everything else the plan reads must exist in the verify workspace: the checkout supplies the sources,
+  // the artifact directory supplies the baseline.
+  assert.equal(existsSync(fileURLToPath(new URL(`../../${part.source_directory}`, import.meta.url))), true);
+  assert.equal(steps[download].with.name, 'swift-coverage');
+  assert.equal(steps[download].with.path, '${{ runner.temp }}/swift-coverage');
+  assert.match(steps[gate].with['coverage-baseline'], /swift-coverage\/baseline\.json/);
+  const upload = workflow.jobs.unit.steps.find(step => step.uses === 'actions/upload-artifact@v4');
+  assert.equal(upload.with.name, 'swift-coverage');
+  const stage = workflow.jobs.unit.steps.find(step => step.name === 'Stage the pull request coverage report').run;
+  assert.ok(stage.includes('swift-coverage/llvm.lcov'));
+  assert.equal(part.report, 'coverage/llvm.lcov');
 });
 
 test('the test run fails only on test results and the coverage result is decided by the gate step alone', () => {
