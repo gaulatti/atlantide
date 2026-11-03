@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "base_branch": "main",
   "readme": "docs/ui-architecture.md",
   "repository_policy": "AGENTS.md",
@@ -16,9 +16,14 @@
       "scripts/clouseau-coverage.sh"
     ]
   ],
-  "coverage": {
-    "format": "llvm",
-    "report": "coverage/llvm.json",
-    "source_directory": "celesti"
-  }
+  "coverage": [
+    {
+      "format": "lcov",
+      "report": "coverage/llvm.lcov",
+      "source_directory": "celesti",
+      "source_suffixes": [
+        ".swift"
+      ]
+    }
+  ]
 }

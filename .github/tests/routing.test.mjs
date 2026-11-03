@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import {readFileSync, existsSync, symlinkSync, unlinkSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdtempSync, existsSync, symlinkSync, unlinkSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import test from 'node:test';
@@ -64,11 +67,57 @@ test('unit and build verification remain parallel and their combined check fails
   }
 });
 
-test('verification steps named by the policy exist and no native coverage gate is claimed', () => {
-  assert.ok(!workflow.jobs.verify.steps.some(step => step.with?.operation === 'coverage'));
+test('verification steps named by the policy exist and secrets stay out of the build jobs', () => {
   assert.ok(!JSON.stringify(workflow.jobs.build).includes('secrets.'));
   assert.ok(!JSON.stringify(workflow.jobs.unit).includes('secrets.'));
+  assert.ok(!JSON.stringify(workflow.jobs.verify).includes('secrets.'));
   for (const name of config.verification.steps) assert.ok(workflow.jobs.verify.steps.some(step => step.name === name));
+});
+
+const stepNamed = (job, name) => workflow.jobs[job].steps.find(step => step.name === name);
+const baseSteps = [['unit', 'Resolve the base revision'], ['verify', 'Resolve the base revision']];
+
+function resolveBase(job, baseSha) {
+  const dir = mkdtempSync(join(tmpdir(), 'base-'));
+  const output = join(dir, 'out');
+  writeFileSync(output, '');
+  const run = spawnSync('bash', ['-c', stepNamed(job, 'Resolve the base revision').run], {
+    env: {PATH: process.env.PATH, BASE_SHA: baseSha, GITHUB_OUTPUT: output}, encoding: 'utf8',
+  });
+  assert.equal(run.status, 0, run.stderr);
+  return {output: readFileSync(output, 'utf8'), stdout: run.stdout};
+}
+
+for (const [job] of baseSteps) {
+  test(`${job}: a manual run has no base revision, skips the baseline and selects the exact gate`, () => {
+    for (const bad of ['', '0'.repeat(40), 'abc123', 'g'.repeat(40), 'A'.repeat(40), `${'a'.repeat(40)}\n--help`]) {
+      const result = resolveBase(job, bad);
+      assert.equal(result.output.trim(), 'sha=');
+      assert.match(result.stdout, /exact 100% gate applies/);
+    }
+    assert.equal(resolveBase(job, head).output.trim(), `sha=${head}`);
+  });
+}
+
+test('the baseline runs only with a base revision and the coverage gate receives it only then', () => {
+  const baseline = stepNamed('unit', 'Measure base revision coverage baseline');
+  assert.equal(baseline.if, "steps.base.outputs.sha != ''");
+  assert.match(baseline.run, /git worktree add --detach "\$RUNNER_TEMP\/clouseau-base" "\$BASE_SHA"/);
+  assert.match(baseline.run, /totals coverage\/llvm\.lcov celesti lcov --source-suffixes=\.swift/);
+  const gate = stepNamed('verify', 'Enforce 100% line and branch coverage');
+  assert.equal(gate.with.operation, 'coverage');
+  assert.equal(gate.with['coverage-base-ref'], '${{ steps.base.outputs.sha }}');
+  assert.match(gate.with['coverage-baseline'], /^\$\{\{ steps\.base\.outputs\.sha && format\(.*\) \|\| '' \}\}$/);
+  assert.ok(!('coverage-report' in gate.with));
+  assert.equal(workflow.jobs.verify.steps.filter(step => step.name === gate.name).length, 1);
+  assert.deepEqual(workflow.jobs.unit.steps.filter(step => step.with?.['fetch-depth'] !== undefined).map(step => step.with['fetch-depth']), [0]);
+  assert.equal(workflow.jobs.verify.steps.find(step => step.uses === 'actions/checkout@v4').with['fetch-depth'], 0);
+});
+
+test('the test run fails only on test results and the coverage result is decided by the gate step alone', () => {
+  const run = stepNamed('unit', 'Run resilience tests');
+  assert.equal(run.run.trim(), 'swift test --enable-code-coverage');
+  assert.ok(!('continue-on-error' in run));
 });
 
 for (const result of ['failure', 'cancelled', 'skipped']) {
