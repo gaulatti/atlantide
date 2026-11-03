@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import {readFileSync, existsSync, symlinkSync, unlinkSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdtempSync, mkdirSync, existsSync, symlinkSync, unlinkSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {createRequire} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import test from 'node:test';
@@ -64,11 +67,93 @@ test('unit and build verification remain parallel and their combined check fails
   }
 });
 
-test('verification steps named by the policy exist and no native coverage gate is claimed', () => {
-  assert.ok(!workflow.jobs.verify.steps.some(step => step.with?.operation === 'coverage'));
+test('verification steps named by the policy exist and secrets stay out of the build jobs', () => {
   assert.ok(!JSON.stringify(workflow.jobs.build).includes('secrets.'));
   assert.ok(!JSON.stringify(workflow.jobs.unit).includes('secrets.'));
+  assert.ok(!JSON.stringify(workflow.jobs.verify).includes('secrets.'));
   for (const name of config.verification.steps) assert.ok(workflow.jobs.verify.steps.some(step => step.name === name));
+});
+
+const stepNamed = (job, name) => workflow.jobs[job].steps.find(step => step.name === name);
+const baseSteps = [['unit', 'Resolve the base revision'], ['verify', 'Resolve the base revision']];
+
+function resolveBase(job, baseSha) {
+  const dir = mkdtempSync(join(tmpdir(), 'base-'));
+  const output = join(dir, 'out');
+  writeFileSync(output, '');
+  const run = spawnSync('bash', ['-c', stepNamed(job, 'Resolve the base revision').run], {
+    env: {PATH: process.env.PATH, BASE_SHA: baseSha, GITHUB_OUTPUT: output}, encoding: 'utf8',
+  });
+  assert.equal(run.status, 0, run.stderr);
+  return {output: readFileSync(output, 'utf8'), stdout: run.stdout};
+}
+
+for (const [job] of baseSteps) {
+  test(`${job}: a manual run has no base revision, skips the baseline and selects the exact gate`, () => {
+    for (const bad of ['', '0'.repeat(40), 'abc123', 'g'.repeat(40), 'A'.repeat(40), `${'a'.repeat(40)}\n--help`]) {
+      const result = resolveBase(job, bad);
+      assert.equal(result.output.trim(), 'sha=');
+      assert.match(result.stdout, /exact 100% gate applies/);
+    }
+    assert.equal(resolveBase(job, head).output.trim(), `sha=${head}`);
+  });
+}
+
+test('the baseline runs only with a base revision and the coverage gate receives it only then', () => {
+  const baseline = stepNamed('unit', 'Measure base revision coverage baseline');
+  assert.equal(baseline.if, "steps.base.outputs.sha != ''");
+  assert.match(baseline.run, /git worktree add --detach "\$RUNNER_TEMP\/clouseau-base" "\$BASE_SHA"/);
+  assert.match(baseline.run, /totals coverage\/llvm\.lcov celesti lcov --source-suffixes=\.swift/);
+  const gate = stepNamed('verify', 'Enforce 100% line and branch coverage');
+  assert.equal(gate.with.operation, 'coverage');
+  assert.equal(gate.with['coverage-base-ref'], '${{ steps.base.outputs.sha }}');
+  assert.match(gate.with['coverage-baseline'], /^\$\{\{ steps\.base\.outputs\.sha && format\(.*\) \|\| '' \}\}$/);
+  assert.ok(!('coverage-report' in gate.with));
+  assert.equal(workflow.jobs.verify.steps.filter(step => step.name === gate.name).length, 1);
+  assert.deepEqual(workflow.jobs.unit.steps.filter(step => step.with?.['fetch-depth'] !== undefined).map(step => step.with['fetch-depth']), [0]);
+  assert.equal(workflow.jobs.verify.steps.find(step => step.uses === 'actions/checkout@v4').with['fetch-depth'], 0);
+});
+
+test('the verify job places the lcov at the recipe report path before the coverage step reads it', () => {
+  const steps = workflow.jobs.verify.steps;
+  const recipe = JSON.parse(readFileSync(new URL('../../.clouseau-local.json', import.meta.url), 'utf8'));
+  assert.equal(recipe.coverage.length, 1);
+  const [part] = recipe.coverage;
+  const place = steps.findIndex(step => step.name === 'Place the coverage report where the recipe reads it');
+  const download = steps.findIndex(step => step.uses === 'actions/download-artifact@v4');
+  const checkout = steps.findIndex(step => step.uses === 'actions/checkout@v4');
+  const gate = steps.findIndex(step => step.name === 'Enforce 100% line and branch coverage');
+  assert.ok(checkout >= 0 && checkout < place && download >= 0 && download < place && place >= 0 && place < gate);
+  assert.equal(steps[place].if, steps[gate].if);
+  assert.match(steps[place].run, /test -f "\$src"/);
+  assert.match(steps[place].run, /src="\$RUNNER_TEMP\/swift-coverage\/llvm\.lcov"/);
+  const dir = mkdtempSync(join(tmpdir(), 'place-'));
+  const temp = join(dir, 'temp'); const workspace = join(dir, 'ws');
+  mkdirSync(join(temp, 'swift-coverage'), {recursive: true}); mkdirSync(workspace);
+  const run = () => spawnSync('bash', ['-c', steps[place].run], {cwd: workspace, env: {PATH: process.env.PATH, RUNNER_TEMP: temp}, encoding: 'utf8'});
+  const missing = run();
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stdout, /did not hand over/);
+  writeFileSync(join(temp, 'swift-coverage', 'llvm.lcov'), 'TN:\n');
+  assert.equal(run().status, 0);
+  assert.equal(readFileSync(join(workspace, part.report), 'utf8'), 'TN:\n');
+  // Everything else the plan reads must exist in the verify workspace: the checkout supplies the sources,
+  // the artifact directory supplies the baseline.
+  assert.equal(existsSync(fileURLToPath(new URL(`../../${part.source_directory}`, import.meta.url))), true);
+  assert.equal(steps[download].with.name, 'swift-coverage');
+  assert.equal(steps[download].with.path, '${{ runner.temp }}/swift-coverage');
+  assert.match(steps[gate].with['coverage-baseline'], /swift-coverage\/baseline\.json/);
+  const upload = workflow.jobs.unit.steps.find(step => step.uses === 'actions/upload-artifact@v4');
+  assert.equal(upload.with.name, 'swift-coverage');
+  const stage = workflow.jobs.unit.steps.find(step => step.name === 'Stage the pull request coverage report').run;
+  assert.ok(stage.includes('swift-coverage/llvm.lcov'));
+  assert.equal(part.report, 'coverage/llvm.lcov');
+});
+
+test('the test run fails only on test results and the coverage result is decided by the gate step alone', () => {
+  const run = stepNamed('unit', 'Run resilience tests');
+  assert.equal(run.run.trim(), 'swift test --enable-code-coverage');
+  assert.ok(!('continue-on-error' in run));
 });
 
 for (const result of ['failure', 'cancelled', 'skipped']) {

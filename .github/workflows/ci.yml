@@ -41,7 +41,7 @@ jobs:
       digest: ${{ steps.engine.outputs.digest }}
     steps:
       - id: engine
-        uses: gaulatti/clouseau/scripts/resolve@fd655851419980f833ff13a94b0d6ff41a901cb2
+        uses: gaulatti/clouseau/scripts/resolve@main
 
   unit:
     if: &verify-code >-
@@ -59,6 +59,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Check out this run frozen Clouseau engine
         uses: actions/checkout@v4
         with:
@@ -76,7 +77,46 @@ jobs:
       - name: Verify source and dependency contracts
         run: scripts/verify-source-contract.sh
       - name: Run resilience tests
-        run: swift test
+        run: swift test --enable-code-coverage
+      - name: Export Swift line coverage
+        run: scripts/clouseau-coverage.sh
+      - name: Resolve the base revision
+        id: base
+        if: *verify-code
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # A manual run has no base revision. Say so and output nothing: the baseline steps skip and
+          # the coverage step then receives no base ref, which selects the stricter exact gate.
+          if [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && ! [[ "$BASE_SHA" =~ ^0{40}$ ]]; then
+            echo "sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "No valid base revision for this event: the coverage baseline is skipped and the exact 100% gate applies."
+          fi
+      - name: Measure base revision coverage baseline
+        if: steps.base.outputs.sha != ''
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          # The baseline comes from the base revision's own tests, never this pull request's code.
+          # Only totals leave this step.
+          git worktree add --detach "$RUNNER_TEMP/clouseau-base" "$BASE_SHA"
+          (cd "$RUNNER_TEMP/clouseau-base" && swift test --enable-code-coverage)
+          scripts/clouseau-coverage.sh "$RUNNER_TEMP/clouseau-base"
+          mkdir -p "$RUNNER_TEMP/swift-coverage"
+          (cd "$RUNNER_TEMP/clouseau-base" && node "$GITHUB_WORKSPACE/.clouseau-ci/bin/coverage-gate.cjs" totals coverage/llvm.lcov celesti lcov --source-suffixes=.swift) > "$RUNNER_TEMP/swift-coverage/baseline.json"
+      - name: Stage the pull request coverage report
+        run: |
+          mkdir -p "$RUNNER_TEMP/swift-coverage"
+          cp coverage/llvm.lcov "$RUNNER_TEMP/swift-coverage/llvm.lcov"
+      - name: Hand the coverage data to the verify job
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-coverage
+          path: ${{ runner.temp }}/swift-coverage
+          if-no-files-found: error
+          retention-days: 7
       - name: Set up Python for frozen shared tests
         uses: actions/setup-python@v5
         with:
@@ -115,10 +155,79 @@ jobs:
           UNIT_RESULT: ${{ needs.unit.result }}
           BUILD_RESULT: ${{ needs.build.result }}
         run: test "$UNIT_RESULT" = success && test "$BUILD_RESULT" = success
+      - uses: actions/checkout@v4
+        if: *verify-code
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Check out this run frozen Clouseau engine
+        if: *verify-code
+        uses: actions/checkout@v4
+        with:
+          repository: gaulatti/clouseau
+          ref: ${{ needs.resolve-clouseau.outputs.sha || '0000000000000000000000000000000000000000' }}
+          path: .clouseau-ci
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        if: *verify-code
+        with:
+          node-version: 22.22.0
+      - name: Load the coverage data measured by the unit job
+        if: *verify-code
+        uses: actions/download-artifact@v4
+        with:
+          name: swift-coverage
+          path: ${{ runner.temp }}/swift-coverage
+      - name: Resolve the base revision
+        id: base
+        if: *verify-code
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # A manual run has no base revision. Say so and output nothing: the baseline steps skip and
+          # the coverage step then receives no base ref, which selects the stricter exact gate.
+          if [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] && ! [[ "$BASE_SHA" =~ ^0{40}$ ]]; then
+            echo "sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "No valid base revision for this event: the coverage baseline is skipped and the exact 100% gate applies."
+          fi
+      - name: Place the coverage report where the recipe reads it
+        if: *verify-code
+        run: |
+          # The recipe's report path is relative to the workspace; the artifact lands in the runner temp.
+          src="$RUNNER_TEMP/swift-coverage/llvm.lcov"
+          test -f "$src" || { echo "::error::The unit job did not hand over $src"; exit 1; }
+          mkdir -p coverage
+          cp "$src" coverage/llvm.lcov
+      - name: Select accepted configuration and recipe
+        if: *verify-code
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          # Protected files come from the base revision. Without one, or while the base lacks them
+          # (the installation of this very change), the reviewed candidate is used.
+          if test -n "$BASE_SHA" && git cat-file -e "$BASE_SHA:.github/clouseau.json" 2>/dev/null; then
+            git show "$BASE_SHA:.github/clouseau.json" > "$RUNNER_TEMP/clouseau-config.json"
+          else
+            cp .github/clouseau.json "$RUNNER_TEMP/clouseau-config.json"
+          fi
+          cp .clouseau-local.json "$RUNNER_TEMP/clouseau-coverage.json"
+          if test -n "$BASE_SHA" && git cat-file -e "$BASE_SHA:.clouseau-local.json" 2>/dev/null; then
+            git show "$BASE_SHA:.clouseau-local.json" > "$RUNNER_TEMP/base-recipe.json"
+            if node -e "process.exit(JSON.parse(require('node:fs').readFileSync(process.argv[1],'utf8')).version===2?0:1)" "$RUNNER_TEMP/base-recipe.json"; then
+              cp "$RUNNER_TEMP/base-recipe.json" "$RUNNER_TEMP/clouseau-coverage.json"
+            fi
+          fi
       - name: Enforce 100% line and branch coverage
         if: *verify-code
-        run: >-
-          echo "::warning::Exact coverage is not enforced: SwiftPM's LLVM export has no branch regions and the shared gate requires measured branches. The policy selects manual merge mode, so the owner merges."
+        uses: ./.clouseau-ci
+        with:
+          operation: coverage
+          config: ${{ runner.temp }}/clouseau-config.json
+          coverage-base-ref: ${{ steps.base.outputs.sha }}
+          coverage-baseline: ${{ steps.base.outputs.sha && format('{0}/swift-coverage/baseline.json', runner.temp) || '' }}
+          coverage-config: ${{ runner.temp }}/clouseau-coverage.json
       - name: Require workflow tests execution
         if: *verify-code
         env:
