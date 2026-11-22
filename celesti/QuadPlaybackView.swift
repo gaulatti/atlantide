@@ -39,6 +39,7 @@ struct QuadPlaybackView: View {
                     KSVideoPlayer(coordinator: coordinator, url: url, options: KSOptions()).opacity(player.isUsingKSPlayer ? 1 : 0)
                 }
                 SabellaTVPlayerSurface(player: player.avPlayer).opacity(player.isUsingKSPlayer ? 0 : 1)
+                PlayerReconnectingBadge(player: player)
             }
         } placeholder: {
             if !player.isActive || player.isAudioOnly {
@@ -49,5 +50,34 @@ struct QuadPlaybackView: View {
                 )
             }
         }
+    }
+}
+
+/// Shown on a tile while its stall watchdog restarts the stream (gaulatti/atlantide#27).
+struct ReconnectingBadge: View {
+    var body: some View {
+        VStack {
+            HStack {
+                Spacer()
+                Label("Reconnecting…", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.callout.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .accessibilityLabel("Reconnecting")
+            }
+            Spacer()
+        }
+        .padding(16)
+        .allowsHitTesting(false)
+    }
+}
+
+/// Observes the player itself, so the badge appears and clears as its watchdog changes state.
+struct PlayerReconnectingBadge: View {
+    @ObservedObject var player: QuadrantPlayer
+
+    var body: some View {
+        if player.isReconnecting { ReconnectingBadge() }
     }
 }

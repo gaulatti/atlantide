@@ -105,6 +105,34 @@ overrides fail startup instead of falling back. The override is compiled out of
 Release builds and changes the shared base for registration, channel browsing,
 viewing delivery, telemetry, SSE, and device actions together.
 
+## Stream stall watchdog
+
+Every AVPlayer-backed player runs its own `StreamStallWatchdog`, a pure state
+machine with an injected clock, sampled every 0.75 s: each quad and emergency
+pane (`QuadrantPlayer`, sampled by its update loop) and the single-player view
+(`CelestiStore`, on a dedicated timer beside its 3 s health check). While a player is meant to be playing, a
+stream is stale when its position has not advanced for 8 s, or when no new video
+frame arrived for 8 s. Frames come from an `AVPlayerItemVideoOutput` on the
+AVPlayer path (`hasNewPixelBuffer`, consumed with `copyPixelBuffer`); audio-only
+streams and the KSPlayer path expose no frame signal and are judged on the clock
+alone (the single-player view does not run the watchdog on the KSPlayer path,
+which has no health timer there). A paused player, including one the user paused,
+is never restarted, and a stream that has never played
+since it was started is left to connect.
+
+A stale stream restarts only that player: the same URL is released and prepared
+again. The first restart is immediate; each next one waits 5 s, then 15 s, then
+60 s, then 60 s again after the previous one (staleness needs 8 s of silence
+after every restart, so the effective gaps are 8, 15, 60 s). Two minutes of
+continuous healthy playback reset the sequence. The tile shows a "Reconnecting…"
+badge from the restart until the clock has moved again and, where there is a
+frame signal, a frame has arrived. Each restart is logged
+(`event=stall_restart`) and reported as a `live_recovery` telemetry event with
+`reason`, `attempt` and `restarts` metadata. The single-player view's old
+position-only `frozen_playback` recovery is replaced by this watchdog; its
+buffering-stall recovery and offline probes are unchanged. A restart there
+re-resolves and prepares the same URL again.
+
 ## Channel viewing history
 
 `ChannelViewingHistoryController` owns each active channel's attribution. The
