@@ -268,7 +268,8 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         name: String?,
         logoURLString: String? = nil,
         channelId: String? = nil,
-        preserveRecoveryState: Bool = false
+        preserveRecoveryState: Bool = false,
+        forceRestart: Bool = false
     ) async {
         guard let inputURL = URL(string: urlString) else {
             quadLog.error("[\(self.quadrant.displayName)] invalid URL: \(urlString, privacy: .public)")
@@ -276,6 +277,20 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             isBuffering = false
             failureStatus = "INVALID FEED"
             onPlaybackFailure?("invalid_url")
+            return
+        }
+
+        // The backend re-sends the stream commands whenever the command connection reopens. The same
+        // stream already playing is left alone; recovery and an explicit restart still start over.
+        if !preserveRecoveryState, !forceRestart,
+           PlaybackCommandPolicy.isDuplicate(
+               requestedURL: inputURL.absoluteString,
+               requestedChannelID: channelId,
+               playingURL: originalURL?.absoluteString,
+               playingChannelID: currentChannelId,
+               isHealthy: isActive && !isFailed
+           ) {
+            quadLog.log("[\(self.quadrant.displayName)] ignoring duplicate play command for the stream already playing")
             return
         }
 
@@ -392,7 +407,6 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             eventType: .playbackStart,
             channelId: currentChannelId,
             streamName: name ?? inputURL.lastPathComponent,
-            streamUrl: urlString,
             quadrant: quadrant.rawValue,
             layoutMode: telemetryLayoutMode,
             decoderType: .hardware,
@@ -533,7 +547,8 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 urlString: url.absoluteString,
                 name: name,
                 logoURLString: logo,
-                channelId: channelId
+                channelId: channelId,
+                forceRestart: true
             )
         }
     }
@@ -592,7 +607,6 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             eventType: .playbackStart,
             channelId: currentChannelId,
             streamName: streamName ?? url.lastPathComponent,
-            streamUrl: url.absoluteString,
             quadrant: quadrant.rawValue,
             layoutMode: telemetryLayoutMode,
             decoderType: .software,
@@ -772,7 +786,6 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                     eventType: .streamLoad,
                     channelId: currentChannelId,
                     streamName: streamName,
-                    streamUrl: currentURL?.absoluteString,
                     quadrant: quadrant.rawValue,
                     layoutMode: telemetryLayoutMode,
                     decoderType: decoderType,
@@ -802,7 +815,6 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 eventType: .playbackHealth,
                 channelId: currentChannelId,
                 streamName: streamName,
-                streamUrl: currentURL?.absoluteString,
                 quadrant: quadrant.rawValue,
                 layoutMode: telemetryLayoutMode,
                 decoderType: decoderType,
@@ -882,7 +894,6 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             eventType: .liveRecovery,
             channelId: currentChannelId,
             streamName: streamName,
-            streamUrl: currentURL?.absoluteString,
             quadrant: quadrant.rawValue,
             layoutMode: telemetryLayoutMode,
             metadata: ["state": playbackStateName]
@@ -950,7 +961,6 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             eventType: .playbackFailure,
             channelId: currentChannelId,
             streamName: streamName,
-            streamUrl: currentURL?.absoluteString,
             quadrant: quadrant.rawValue,
             layoutMode: telemetryLayoutMode,
             decoderType: failedDecoderType,

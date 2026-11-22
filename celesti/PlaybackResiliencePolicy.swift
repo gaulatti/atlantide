@@ -100,6 +100,41 @@ enum PlaybackRecoveryPolicy {
     }
 }
 
+/// A play command that names what already plays, healthily, changes nothing. The backend re-sends a
+/// device's stream commands whenever its command connection (re)opens, so treating each as a fresh
+/// request tears the player down and rebuffers it on every reconnect.
+enum PlaybackCommandPolicy {
+    static func isDuplicate(
+        requestedURL: String,
+        requestedChannelID: String?,
+        playingURL: String?,
+        playingChannelID: String?,
+        isHealthy: Bool
+    ) -> Bool {
+        isHealthy && playingURL == requestedURL && playingChannelID == requestedChannelID
+    }
+}
+
+/// How long the app waits before reopening a command connection the server closed. A connection that
+/// lasted is reopened after a second; one that keeps ending quickly backs off up to 30 seconds, so a
+/// server that closes every few seconds is not answered with a tight loop of reconnects.
+enum CommandStreamReconnectPolicy {
+    static let minimumHealthyLifetime: TimeInterval = 10
+    static let initialBackoff: TimeInterval = 1
+    static let maximumBackoff: TimeInterval = 30
+
+    static func next(
+        connectionLifetime: TimeInterval,
+        previousBackoff: TimeInterval
+    ) -> (delay: TimeInterval, nextBackoff: TimeInterval) {
+        guard connectionLifetime < minimumHealthyLifetime else {
+            return (initialBackoff, initialBackoff)
+        }
+        let delay = min(max(previousBackoff, initialBackoff), maximumBackoff)
+        return (delay, min(delay * 2, maximumBackoff))
+    }
+}
+
 struct PlaybackRequestArbiter {
     struct Request: Equatable, Sendable {
         fileprivate let generation: UInt64
@@ -145,45 +180,101 @@ enum EmergencyCarouselPolicy {
     }
 }
 
+/// A telemetry metadata value as the endpoint types it: a number, a flag or text.
+enum TelemetryMetadataValue: Encodable, Equatable {
+    case number(Double)
+    case flag(Bool)
+    case text(String)
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .number(let value): try container.encode(value)
+        case .flag(let value): try container.encode(value)
+        case .text(let value): try container.encode(value)
+        }
+    }
+}
+
 enum TelemetryPrivacy {
     private static let maximumIdentityLength = 128
     private static let maximumMetadataEntries = 16
-    private static let maximumMetadataKeyLength = 64
-    private static let maximumMetadataValueLength = 256
-
-    static func sanitizedStreamURL(_ rawValue: String?) -> String? {
-        guard let rawValue,
-              var components = URLComponents(string: rawValue),
-              let scheme = components.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              components.host != nil else { return nil }
-
-        components.scheme = scheme
-        components.user = nil
-        components.password = nil
-        components.query = nil
-        components.fragment = nil
-        return components.string
-    }
 
     static func boundedIdentity(_ value: String?) -> String? {
         guard let value else { return nil }
         return String(value.prefix(maximumIdentityLength))
     }
 
-    static func boundedMetadata(_ metadata: [String: String]?) -> [String: String]? {
+    /// The metadata the telemetry endpoint accepts (mattone's `METADATA_RULES`): a fixed set of keys, each
+    /// with a typed value, at most 16 entries. Anything else makes the whole event a 400, so the app
+    /// sends only these, converted from the string values the call sites collect.
+    static func backendMetadata(_ metadata: [String: String]?) -> [String: TelemetryMetadataValue]? {
         guard let metadata else { return nil }
-        let entries = metadata
-            .sorted { $0.key < $1.key }
-            .prefix(maximumMetadataEntries)
-            .map {
-                (
-                    String($0.key.prefix(maximumMetadataKeyLength)),
-                    String($0.value.prefix(maximumMetadataValueLength))
-                )
-            }
-        return entries.reduce(into: [:]) { bounded, entry in
-            bounded[entry.0] = entry.1
+        var accepted: [String: TelemetryMetadataValue] = [:]
+        for (rawKey, rawValue) in metadata.sorted(by: { $0.key < $1.key }) {
+            guard let (key, value) = backendEntry(key: rawKey, value: rawValue) else { continue }
+            accepted[key] = value
+            if accepted.count == maximumMetadataEntries { break }
         }
+        return accepted.isEmpty ? nil : accepted
+    }
+
+    private static func backendEntry(key: String, value: String) -> (String, TelemetryMetadataValue)? {
+        func number(_ range: ClosedRange<Double>) -> TelemetryMetadataValue? {
+            guard let parsed = Double(value), parsed.isFinite, range.contains(parsed) else { return nil }
+            return .number(parsed)
+        }
+        func text(_ limit: Int) -> TelemetryMetadataValue? {
+            value.count <= limit ? .text(value) : nil
+        }
+        func choice(_ values: [String]) -> TelemetryMetadataValue? {
+            values.contains(value) ? .text(value) : nil
+        }
+        func flag() -> TelemetryMetadataValue? {
+            switch value {
+            case "true": .flag(true)
+            case "false": .flag(false)
+            default: nil
+            }
+        }
+        let accepted: TelemetryMetadataValue?
+        let backendKey: String
+        switch key {
+        case "healthy", "isPlaying", "recoveryExhausted", "success":
+            backendKey = key; accepted = flag()
+        case "state":
+            // The player's own state names, as the backend's boolean `isPlaying`.
+            backendKey = "isPlaying"
+            accepted = value == "ready" || value == "playing" ? .flag(true) : (value == "buffering" ? .flag(false) : nil)
+        case "bufferedDurationMs":
+            backendKey = key; accepted = number(0...3_600_000)
+        case "liveOffsetMs":
+            backendKey = key; accepted = number(-1...3_600_000)
+        case "playbackSpeed":
+            backendKey = key; accepted = number(0...4)
+        case "bytesLoaded", "bytesTransferred":
+            backendKey = "bytesLoaded"; accepted = number(0...9_007_199_254_740_991)
+        case "throughputBps", "observedBitrate":
+            backendKey = "throughputBps"; accepted = number(0...9_007_199_254_740_991)
+        case "status":
+            backendKey = key; accepted = number(0...599)
+        case "hardwareDecoders", "softwareDecoders", "hardwareVideoDecoders", "softwareVideoDecoders":
+            backendKey = key; accepted = number(0...32)
+        case "result":
+            backendKey = key; accepted = choice(["success", "failure", "canceled", "unknown"])
+        case "dataType":
+            backendKey = key; accepted = choice(["manifest", "media", "drm", "unknown"])
+        case "recoveryResult":
+            backendKey = key; accepted = choice(["started", "success", "failure", "exhausted"])
+        case "eventName":
+            backendKey = key; accepted = text(128)
+        case "page", "message":
+            backendKey = key; accepted = text(256)
+        case "method":
+            backendKey = key; accepted = text(16)
+        default:
+            return nil
+        }
+        return accepted.map { (backendKey, $0) }
     }
 }

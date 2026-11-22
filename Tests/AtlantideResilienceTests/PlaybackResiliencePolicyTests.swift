@@ -64,14 +64,62 @@ import Testing
     #expect(EmergencyCarouselPolicy.visibleSlots(assignedSlots: assigned, offlineSlots: Set(assigned), windowStartSlot: 0) == [nil, nil])
 }
 
-@Test func telemetryRedactsCredentialsAndBoundsCardinality() {
-    let signed = "https://user:secret@Media.Example.test/live/feed.m3u8?token=credential&expires=1#fragment"
-    #expect(TelemetryPrivacy.sanitizedStreamURL(signed) == "https://Media.Example.test/live/feed.m3u8")
-    #expect(TelemetryPrivacy.sanitizedStreamURL("file:///private/secret.m3u8") == nil)
-    #expect(TelemetryPrivacy.boundedIdentity(String(repeating: "x", count: 200))?.count == 128)
-    #expect(TelemetryPrivacy.boundedMetadata(Dictionary(uniqueKeysWithValues: (0..<20).map { ("key\($0)", String(repeating: "v", count: 300)) }))?.count == 16)
-    #expect(TelemetryPrivacy.boundedMetadata(["key": String(repeating: "v", count: 300)])?["key"]?.count == 256)
+@Test func aPlayCommandForTheStreamAlreadyPlayingHealthilyIsADuplicate() {
+    let url = "https://media.example.test/live/feed.ts"
+    #expect(PlaybackCommandPolicy.isDuplicate(requestedURL: url, requestedChannelID: "c1", playingURL: url, playingChannelID: "c1", isHealthy: true))
+    #expect(PlaybackCommandPolicy.isDuplicate(requestedURL: url, requestedChannelID: nil, playingURL: url, playingChannelID: nil, isHealthy: true))
+    // A failed or offline stream is retried, another stream or channel is a real change.
+    #expect(!PlaybackCommandPolicy.isDuplicate(requestedURL: url, requestedChannelID: "c1", playingURL: url, playingChannelID: "c1", isHealthy: false))
+    #expect(!PlaybackCommandPolicy.isDuplicate(requestedURL: url, requestedChannelID: "c1", playingURL: "https://other.example.test/a.ts", playingChannelID: "c1", isHealthy: true))
+    #expect(!PlaybackCommandPolicy.isDuplicate(requestedURL: url, requestedChannelID: "c1", playingURL: url, playingChannelID: "c2", isHealthy: true))
+    #expect(!PlaybackCommandPolicy.isDuplicate(requestedURL: url, requestedChannelID: "c1", playingURL: nil, playingChannelID: nil, isHealthy: true))
 }
+
+@Test func theCommandConnectionBacksOffWhenTheServerKeepsClosingIt() {
+    // A connection that lasted is reopened after a second and the backoff resets.
+    #expect(CommandStreamReconnectPolicy.next(connectionLifetime: 120, previousBackoff: 16) == (1, 1))
+    #expect(CommandStreamReconnectPolicy.next(connectionLifetime: 10, previousBackoff: 8) == (1, 1))
+    // Connections that end within seconds back off up to the cap, never a tight loop.
+    var backoff = CommandStreamReconnectPolicy.initialBackoff
+    var delays: [TimeInterval] = []
+    for _ in 0..<7 {
+        let step = CommandStreamReconnectPolicy.next(connectionLifetime: 2, previousBackoff: backoff)
+        delays.append(step.delay)
+        backoff = step.nextBackoff
+    }
+    #expect(delays == [1, 2, 4, 8, 16, 30, 30])
+    #expect(CommandStreamReconnectPolicy.next(connectionLifetime: 0, previousBackoff: 0).delay == 1)
+}
+
+@Test func telemetryMetadataKeepsOnlyWhatTheEndpointAcceptsWithItsTypes() {
+    #expect(TelemetryPrivacy.boundedIdentity(String(repeating: "x", count: 200))?.count == 128)
+    let health = TelemetryPrivacy.backendMetadata([
+        "state": "ready",
+        "positionMs": "4916",
+        "bufferedDurationMs": "11645",
+        "physicalMemoryMB": "3010",
+        "preferredBufferMs": "20000",
+        "observedBitrate": "6128079",
+        "indicatedBitrate": "6128079",
+        "stalls": "0",
+    ])
+    #expect(health == [
+        "isPlaying": .flag(true),
+        "bufferedDurationMs": .number(11645),
+        "throughputBps": .number(6128079),
+    ])
+    #expect(TelemetryPrivacy.backendMetadata(["state": "buffering"]) == ["isPlaying": .flag(false)])
+    #expect(TelemetryPrivacy.backendMetadata(["result": "success", "mediaRequests": "3", "bytesTransferred": "12765808"]) == [
+        "result": .text("success"),
+        "bytesLoaded": .number(12765808),
+    ])
+    // Out-of-range, unparseable and unknown values are dropped rather than failing the whole event.
+    #expect(TelemetryPrivacy.backendMetadata(["bufferedDurationMs": "-5", "status": "700", "result": "maybe", "probe": "1", "nextProbeMs": "30000"]) == nil)
+    #expect(TelemetryPrivacy.backendMetadata(["bufferedDurationMs": "NaN"]) == nil)
+    #expect(TelemetryPrivacy.backendMetadata(nil) == nil)
+    #expect(TelemetryPrivacy.backendMetadata(["page": String(repeating: "p", count: 257), "method": "POST"]) == ["method": .text("POST")])
+}
+
 
 private func profile(_ preferred: TimeInterval, _ maximum: TimeInterval, _ memory: UInt64, _ lowMemory: Bool) -> PlaybackBufferProfile {
     PlaybackBufferProfile(

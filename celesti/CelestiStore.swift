@@ -737,6 +737,7 @@ private final class CommandStreamClient {
 
         streamTask = Task {
             var backoff: UInt64 = 1_000_000_000
+            var streamEndBackoff = CommandStreamReconnectPolicy.initialBackoff
 
             while !Task.isCancelled {
                 do {
@@ -755,6 +756,7 @@ private final class CommandStreamClient {
                     }
 
                     sseLog.log("SSE connected successfully, status: \(httpResponse.statusCode, privacy: .public)")
+                    let connectedAt = Date()
                     backoff = 1_000_000_000
                     var buffer = ""
 
@@ -794,7 +796,14 @@ private final class CommandStreamClient {
                         tryDecodeAndDispatch(buffer, onCommand: onCommand)
                     }
 
-                    sseLog.warning("SSE stream ended (server closed connection)")
+                    let lifetime = Date().timeIntervalSince(connectedAt)
+                    let wait = CommandStreamReconnectPolicy.next(
+                        connectionLifetime: lifetime,
+                        previousBackoff: streamEndBackoff
+                    )
+                    streamEndBackoff = wait.nextBackoff
+                    sseLog.warning("SSE stream ended (server closed connection) after \(lifetime, privacy: .public)s, reconnecting in \(wait.delay, privacy: .public)s")
+                    try? await Task.sleep(for: .seconds(wait.delay))
                 } catch {
                     if Task.isCancelled {
                         sseLog.log("SSE task cancelled, stopping reconnection")
@@ -935,6 +944,16 @@ final class PlayerController: NSObject, ObservableObject {
         medium: CelestiChannelMedium
     ) async {
         playerLog.log("playStream called: url=\(urlString, privacy: .public) name=\(radioName ?? "nil", privacy: .public)")
+        if PlaybackCommandPolicy.isDuplicate(
+            requestedURL: urlString,
+            requestedChannelID: channelID,
+            playingURL: originalURL?.absoluteString,
+            playingChannelID: currentChannelID,
+            isHealthy: currentSource == .remoteCommand && !isPlaybackFailed && (player.currentItem != nil || isUsingKSPlayer)
+        ) {
+            playerLog.log("playStream: ignoring duplicate command for the stream already playing")
+            return
+        }
         await play(
             urlString: urlString,
             radioName: radioName,
@@ -1317,7 +1336,6 @@ final class PlayerController: NSObject, ObservableObject {
             deviceCode: DeviceIdentityStore.shared.deviceId,
             eventType: .playbackStart,
             streamName: radioName ?? currentURL?.lastPathComponent,
-            streamUrl: urlString,
             layoutMode: .single,
             decoderType: .hardware,
             decoderName: "AVPlayer"
@@ -1366,7 +1384,6 @@ final class PlayerController: NSObject, ObservableObject {
             deviceCode: DeviceIdentityStore.shared.deviceId,
             eventType: .playbackStart,
             streamName: currentRadioName ?? url.lastPathComponent,
-            streamUrl: url.absoluteString,
             layoutMode: .single,
             decoderType: .software,
             decoderName: "KSPlayer/FFmpeg"
@@ -1501,7 +1518,6 @@ final class PlayerController: NSObject, ObservableObject {
                 deviceCode: DeviceIdentityStore.shared.deviceId,
                 eventType: .bufferingStart,
                 streamName: currentRadioName,
-                streamUrl: currentURL?.absoluteString,
                 layoutMode: .single,
                 decoderType: decoderType
             )
@@ -1515,7 +1531,6 @@ final class PlayerController: NSObject, ObservableObject {
             deviceCode: DeviceIdentityStore.shared.deviceId,
             eventType: .bufferingEnd,
             streamName: currentRadioName,
-            streamUrl: currentURL?.absoluteString,
             layoutMode: .single,
             decoderType: decoderType
         )
@@ -1539,7 +1554,6 @@ final class PlayerController: NSObject, ObservableObject {
                 deviceCode: DeviceIdentityStore.shared.deviceId,
                 eventType: .playbackHealth,
                 streamName: currentRadioName,
-                streamUrl: currentURL?.absoluteString,
                 layoutMode: .single,
                 decoderType: .software,
                 metadata: [
@@ -1764,7 +1778,6 @@ final class PlayerController: NSObject, ObservableObject {
                     deviceCode: DeviceIdentityStore.shared.deviceId,
                     eventType: .streamLoad,
                     streamName: currentRadioName,
-                    streamUrl: currentURL?.absoluteString,
                     layoutMode: .single,
                     decoderType: .hardware,
                     bitrate: event.observedBitrate,
@@ -1791,7 +1804,6 @@ final class PlayerController: NSObject, ObservableObject {
                 deviceCode: DeviceIdentityStore.shared.deviceId,
                 eventType: .playbackHealth,
                 streamName: currentRadioName,
-                streamUrl: currentURL?.absoluteString,
                 layoutMode: .single,
                 decoderType: .hardware,
                 metadata: metadata

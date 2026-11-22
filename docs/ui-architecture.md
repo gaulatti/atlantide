@@ -133,6 +133,27 @@ position-only `frozen_playback` recovery is replaced by this watchdog; its
 buffering-stall recovery and offline probes are unchanged. A restart there
 re-resolves and prepares the same URL again.
 
+## Command connection and playback commands
+
+The device keeps one server-sent-events connection to Mattone for its commands. Mattone re-sends a
+device's current stream commands (the single stream, or one per quad slot) every time that connection
+opens. Two rules keep a reconnect from touching playback:
+
+- A play command for the stream already playing, with the same channel, on a player that is active and
+  not failed, is ignored (`PlaybackCommandPolicy`). Recovery, the offline probe and an explicit
+  `restart_stream` still start the stream over. Before this, each reconnect stopped and restarted the
+  player, so a connection the server closed every two seconds made the picture rebuffer about every
+  three.
+- A connection that the server closed is reopened after one second when it had lasted ten seconds or
+  more, and after 1, 2, 4, 8, 16 then 30 seconds while connections keep ending sooner
+  (`CommandStreamReconnectPolicy`); it was reopened at once with no wait.
+
+Telemetry follows Mattone's DTO: the app never sends `streamUrl` (stream URLs can carry credentials),
+and event metadata is limited to Mattone's typed keys, converted by `TelemetryPrivacy.backendMetadata`
+(for example `observedBitrate` is sent as `throughputBps` and the player state as `isPlaying`). An
+event outside the DTO is rejected as a whole with HTTP 400, which had left Mattone with no playback
+telemetry from tvOS.
+
 ## Channel viewing history
 
 `ChannelViewingHistoryController` owns each active channel's attribution. The
