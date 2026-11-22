@@ -194,6 +194,8 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     @Published var isMuted = false
     @Published var isFailed = false
     @Published var isAudioOnly = false
+    /// True while the stall watchdog is restarting this player (the "Reconnecting…" badge).
+    @Published private(set) var isReconnecting = false
     @Published var streamName: String?
     @Published var logoURL: URL?
     @Published var failureStatus = "RETRYING"
@@ -230,9 +232,9 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     private var lastPlaybackErrorAt: Date?
     private var lastHealthSnapshotAt: Date = .distantPast
     private var lastHealthTelemetryAt: Date = .distantPast
-    private var lastObservedPosition: TimeInterval = -1
-    private var lastPositionAdvancedAt: Date = .distantPast
-    private var lastStallRecoveryAt: Date = .distantPast
+    private var stallWatchdog = StreamStallWatchdog(clock: { ProcessInfo.processInfo.systemUptime })
+    private var videoOutput: AVPlayerItemVideoOutput?
+    private var hasPlayedSinceStart = false
     private var lastAccessLogRequestCount = 0
 
     init(quadrant: Quadrant, layoutMode: TelemetryLayoutMode = .quad) {
@@ -262,11 +264,16 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         quadLog.log("[\(self.quadrant.displayName)] play: \(urlString, privacy: .public) name=\(name ?? "nil", privacy: .public)")
         let retainedProbeCount = offlineProbeCount
         let retainedRecoveryTimes = recentRecoveryTimes
+        let retainedWatchdog = stallWatchdog
+        let retainedPlayedState = hasPlayedSinceStart
         stop()
         let generation = playbackGeneration
         if preserveRecoveryState {
             offlineProbeCount = retainedProbeCount
             recentRecoveryTimes = retainedRecoveryTimes
+            stallWatchdog = retainedWatchdog
+            hasPlayedSinceStart = retainedPlayedState
+            isReconnecting = stallWatchdog.isReconnecting
         }
         recoveryAttempt = 0
         originalURL = inputURL
@@ -313,6 +320,12 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         item.preferredPeakBitRate = maxBitrate
         item.preferredMaximumResolution = CGSize(width: 854, height: 480)
         item.preferredForwardBufferDuration = bufferProfile.preferredForwardDuration
+        // Frames are only counted, never shown: the output lets the watchdog see a frozen picture.
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        ])
+        item.add(output)
+        videoOutput = output
 
         playbackHealthLog.info(
             "event=buffer_profile stream=\(self.streamIdentity, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public) physicalMemoryMB=\(self.bufferProfile.physicalMemoryMB) lowMemory=\(self.bufferProfile.lowMemory) preferredSeconds=\(self.bufferProfile.preferredForwardDuration) maximumSeconds=\(self.bufferProfile.maximumDuration)"
@@ -454,9 +467,10 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         lastPlaybackErrorAt = nil
         lastHealthTelemetryAt = .distantPast
         lastHealthSnapshotAt = .distantPast
-        lastObservedPosition = -1
-        lastPositionAdvancedAt = .distantPast
-        lastStallRecoveryAt = .distantPast
+        stallWatchdog.reset()
+        videoOutput = nil
+        hasPlayedSinceStart = false
+        isReconnecting = false
         lastAccessLogRequestCount = 0
         audioPeakMonitor.reset()
         currentURL = nil
@@ -612,7 +626,12 @@ final class QuadrantPlayer: NSObject, ObservableObject {
                 updateKSPlayerMediaKind()
             }
             logHealthIfNeeded(position: currentTime, bufferedDuration: nil, decoderType: .software)
-            detectFrozenPlayback(position: currentTime, claimsToBePlaying: state == .bufferFinished)
+            runStallWatchdog(
+                position: currentTime,
+                isPlaying: state == .bufferFinished,
+                isPaused: state == .paused || state == .playedToTheEnd,
+                hasNewFrame: nil
+            )
             resetRecoveryCircuitIfStable(claimsToBePlaying: state == .bufferFinished)
             return
         }
@@ -636,9 +655,11 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         )
         let bufferedDuration = bufferedDurationForAVPlayer()
         logHealthIfNeeded(position: position, bufferedDuration: bufferedDuration, decoderType: .hardware)
-        detectFrozenPlayback(
+        runStallWatchdog(
             position: position,
-            claimsToBePlaying: avPlayer.timeControlStatus == .playing && avPlayer.rate > 0
+            isPlaying: avPlayer.timeControlStatus == .playing && avPlayer.rate > 0,
+            isPaused: avPlayer.timeControlStatus == .paused,
+            hasNewFrame: pollNewFrame()
         )
         resetRecoveryCircuitIfStable(claimsToBePlaying: avPlayer.timeControlStatus == .playing)
     }
@@ -774,24 +795,60 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         }
     }
 
-    private func detectFrozenPlayback(position: TimeInterval, claimsToBePlaying: Bool) {
-        let now = Date()
-        if lastObservedPosition < 0 || position > lastObservedPosition + 0.25 {
-            lastObservedPosition = position
-            lastPositionAdvancedAt = now
-            return
-        }
-        guard PlaybackRecoveryPolicy.isFrozen(
-            claimsToBePlaying: claimsToBePlaying,
-            lastPositionAdvancedAt: lastPositionAdvancedAt,
-            now: now
-        ),
-              now.timeIntervalSince(lastStallRecoveryAt) >= 20 else { return }
-        lastStallRecoveryAt = now
-        playbackHealthLog.warning(
-            "event=frozen_recovery stream=\(self.streamIdentity, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public)"
+    /// Whether a new video frame arrived since the last poll; nil without a video track.
+    private func pollNewFrame() -> Bool? {
+        guard let output = videoOutput, avPlayer.currentItem?.presentationSize != .zero else { return nil }
+        let time = output.itemTime(forHostTime: CACurrentMediaTime())
+        guard output.hasNewPixelBuffer(forItemTime: time) else { return false }
+        // Taking the buffer is what marks the frame as seen; without it every poll would say "new".
+        _ = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil)
+        return true
+    }
+
+    /// Feeds the per-player stall watchdog. A stream that has never played since it was started is
+    /// left to connect (a slow start is not a stall); once it has played, or while a restart is
+    /// pending, every sample counts. A restart re-prepares the same URL for this player only.
+    private func runStallWatchdog(position: TimeInterval, isPlaying: Bool, isPaused: Bool, hasNewFrame: Bool?) {
+        hasPlayedSinceStart = hasPlayedSinceStart || isPlaying
+        guard hasPlayedSinceStart || stallWatchdog.isReconnecting else { return }
+        let decision = stallWatchdog.evaluate(
+            StreamStallWatchdog.Observation(
+                isPaused: isPaused,
+                position: position,
+                hasNewFrame: hasNewFrame
+            )
         )
-        recoverToLiveEdge()
+        isReconnecting = stallWatchdog.isReconnecting
+        guard case let .restart(attempt, reason) = decision, let url = originalURL else { return }
+        playbackHealthLog.warning(
+            "event=stall_restart stream=\(self.streamIdentity, privacy: .public) viewport=\(self.quadrant.rawValue) layout=\(self.telemetryLayoutMode.rawValue, privacy: .public) reason=\(reason.rawValue, privacy: .public) attempt=\(attempt) restarts=\(self.stallWatchdog.totalRestarts)"
+        )
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .liveRecovery,
+            channelId: currentChannelId,
+            streamName: streamName,
+            streamUrl: currentURL?.absoluteString,
+            quadrant: quadrant.rawValue,
+            layoutMode: telemetryLayoutMode,
+            metadata: [
+                "reason": reason.rawValue,
+                "attempt": attempt.description,
+                "restarts": stallWatchdog.totalRestarts.description,
+            ]
+        )
+        let name = streamName
+        let logo = logoURL?.absoluteString
+        let channelId = currentChannelId
+        Task {
+            await play(
+                urlString: url.absoluteString,
+                name: name,
+                logoURLString: logo,
+                channelId: channelId,
+                preserveRecoveryState: true
+            )
+        }
     }
 
     private func recoverToLiveEdge() {
