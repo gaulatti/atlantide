@@ -10,6 +10,24 @@ import UIKit
 private let quadLog = Logger(subsystem: "com.gaulatti.celesti", category: "QuadPlayer")
 private let playbackHealthLog = Logger(subsystem: "com.gaulatti.celesti", category: "PlaybackHealth")
 
+extension AVPlayerItemVideoOutput {
+    /// An output that exists only so the stall watchdog can see whether frames keep arriving.
+    static func stallProbe() -> AVPlayerItemVideoOutput {
+        AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        ])
+    }
+
+    /// Whether a new frame arrived since the last call. Taking the buffer is what marks the frame
+    /// as seen; without it every poll would say "new".
+    func consumeNewFrame() -> Bool {
+        let time = itemTime(forHostTime: CACurrentMediaTime())
+        guard hasNewPixelBuffer(forItemTime: time) else { return false }
+        _ = copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil)
+        return true
+    }
+}
+
 private final class AudioPeakMonitor: @unchecked Sendable {
     private let lock = NSLock()
     private var peak: Float = 0
@@ -321,9 +339,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         item.preferredMaximumResolution = CGSize(width: 854, height: 480)
         item.preferredForwardBufferDuration = bufferProfile.preferredForwardDuration
         // Frames are only counted, never shown: the output lets the watchdog see a frozen picture.
-        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-        ])
+        let output = AVPlayerItemVideoOutput.stallProbe()
         item.add(output)
         videoOutput = output
 
@@ -798,11 +814,7 @@ final class QuadrantPlayer: NSObject, ObservableObject {
     /// Whether a new video frame arrived since the last poll; nil without a video track.
     private func pollNewFrame() -> Bool? {
         guard let output = videoOutput, avPlayer.currentItem?.presentationSize != .zero else { return nil }
-        let time = output.itemTime(forHostTime: CACurrentMediaTime())
-        guard output.hasNewPixelBuffer(forItemTime: time) else { return false }
-        // Taking the buffer is what marks the frame as seen; without it every poll would say "new".
-        _ = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil)
-        return true
+        return output.consumeNewFrame()
     }
 
     /// Feeds the per-player stall watchdog. A stream that has never played since it was started is

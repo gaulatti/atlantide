@@ -68,6 +68,8 @@ struct PlaybackPresentation: Equatable {
     var qualityTier: Int = 3
     var isPlaybackFailed: Bool = false
     var failedStreamName: String? = nil
+    /// The stall watchdog is restarting the stream (the "Reconnecting…" badge).
+    var isReconnecting: Bool = false
 }
 
 @MainActor
@@ -869,6 +871,10 @@ final class PlayerController: NSObject, ObservableObject {
     private var lastAccessLogRequestCount = 0
     private var offlineProbeCount = 0
     private var offlineProbeTask: Task<Void, Never>?
+    private var stallWatchdog = StreamStallWatchdog(clock: { ProcessInfo.processInfo.systemUptime })
+    private var stallTimer: Timer?
+    private var videoOutput: AVPlayerItemVideoOutput?
+    private var hasPlayedSinceStart = false
 
     // DVR auto-show tracking
     private var lastKnownTime: Double = 0
@@ -929,6 +935,9 @@ final class PlayerController: NSObject, ObservableObject {
         let stoppedStreamName = currentRadioName
         let hadPlayback = currentSource != nil || player.currentItem != nil || isUsingKSPlayer
         stopWatchdog()
+        stallWatchdog.reset()
+        videoOutput = nil
+        hasPlayedSinceStart = false
         removeTimeObserver()
         updateTask?.cancel()
         updateTask = nil
@@ -1129,7 +1138,8 @@ final class PlayerController: NSObject, ObservableObject {
         channelID: String?,
         medium: CelestiChannelMedium,
         restoringRecoveryAttempt: Int? = nil,
-        restoringOfflineProbeCount: Int? = nil
+        restoringOfflineProbeCount: Int? = nil,
+        restoringStall: (watchdog: StreamStallWatchdog, hasPlayed: Bool)? = nil
     ) async {
         guard !Task.isCancelled else { return }
         guard let inputURL = URL(string: urlString) else {
@@ -1139,6 +1149,10 @@ final class PlayerController: NSObject, ObservableObject {
 
         playerLog.log("play: url=\(urlString, privacy: .public) name=\(radioName ?? "nil", privacy: .public) source=\(source == .demo ? "demo" : "remote")")
         stop()
+        if let restoringStall {
+            stallWatchdog = restoringStall.watchdog
+            hasPlayedSinceStart = restoringStall.hasPlayed
+        }
         let playbackRequest = playbackRequestArbiter.begin()
         audioFallbackApplied = false
         originalURL = inputURL
@@ -1156,7 +1170,8 @@ final class PlayerController: NSObject, ObservableObject {
             streamTitle: nil,
             isAudioOnly: medium == .radio,
             isBuffering: true,
-            qualityTier: qualityTier
+            qualityTier: qualityTier,
+            isReconnecting: stallWatchdog.isReconnecting
         )
 
         playerLog.log("play: resolving stream URL")
@@ -1216,6 +1231,10 @@ final class PlayerController: NSObject, ObservableObject {
             self.currentPresentation = presentation
         }, queue: DispatchQueue.main)
         item.add(metadataOutput)
+        // Frames are only counted, never shown: the output lets the stall watchdog see a frozen picture.
+        let frameProbe = AVPlayerItemVideoOutput.stallProbe()
+        item.add(frameProbe)
+        videoOutput = frameProbe
 
         playerLog.log("play: replacing current item and calling play()")
         playbackStartedAt = Date()
@@ -1628,6 +1647,11 @@ final class PlayerController: NSObject, ObservableObject {
             self.checkPlaybackHealth()
             self.maybeUpgradeQuality()
         }
+        // Frames and the clock are sampled faster than the 3 s health check so a stale stream is
+        // caught within a second of the timeout.
+        stallTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
+            self?.runStallWatchdog()
+        }
     }
 
     private func stopWatchdog() {
@@ -1636,6 +1660,8 @@ final class PlayerController: NSObject, ObservableObject {
         }
         watchdogTimer?.invalidate()
         watchdogTimer = nil
+        stallTimer?.invalidate()
+        stallTimer = nil
     }
 
     private func removeTimeObserver() {
@@ -1676,13 +1702,7 @@ final class PlayerController: NSObject, ObservableObject {
             }
             bufferingStartedAt = nil
             let currentPos = player.currentTime()
-            if currentPos == lastPlaybackPosition {
-                let freezeDuration = Date().timeIntervalSince(lastPositionUpdateAt)
-                if freezeDuration >= PlaybackRecoveryPolicy.freezeTimeout {
-                    playerLog.error("checkPlaybackHealth: frozen playback for \(freezeDuration)s, recovering")
-                    performEmergencyRecovery(reason: "frozen_playback")
-                }
-            } else {
+            if currentPos != lastPlaybackPosition {
                 if !hasEverReachedReady {
                     let elapsed = playbackStartedAt.map { Date().timeIntervalSince($0) }
                     playerLog.log("checkPlaybackHealth: first position change detected after \(elapsed ?? 0, privacy: .public)s, playback started")
@@ -1757,6 +1777,66 @@ final class PlayerController: NSObject, ObservableObject {
                 layoutMode: .single,
                 decoderType: .hardware,
                 metadata: metadata
+            )
+        }
+    }
+
+    /// Feeds the stall watchdog (see `StreamStallWatchdog`). A stream that has never played since it
+    /// was started is left to connect; once it has played, or while a restart is pending, every
+    /// sample counts. A restart re-resolves and re-prepares the same URL.
+    private func runStallWatchdog() {
+        // The KSPlayer path has no health timer (and no frame signal), so only AVPlayer is covered here.
+        guard !isPlaybackFailed, !isUsingKSPlayer, currentSource != nil else { return }
+        let seconds = player.currentTime().seconds
+        let position = seconds.isFinite ? seconds : 0
+        let isPlaying = player.timeControlStatus == .playing && player.rate > 0
+        let isPaused = playbackWasExplicitlyPaused || player.timeControlStatus == .paused
+        var hasNewFrame: Bool?
+        if let videoOutput, player.currentItem?.presentationSize != .zero {
+            hasNewFrame = videoOutput.consumeNewFrame()
+        }
+        hasPlayedSinceStart = hasPlayedSinceStart || isPlaying
+        guard hasPlayedSinceStart || stallWatchdog.isReconnecting else { return }
+        let decision = stallWatchdog.evaluate(
+            StreamStallWatchdog.Observation(isPaused: isPaused, position: position, hasNewFrame: hasNewFrame)
+        )
+        if currentPresentation?.isReconnecting != stallWatchdog.isReconnecting {
+            currentPresentation?.isReconnecting = stallWatchdog.isReconnecting
+        }
+        guard case let .restart(attempt, reason) = decision, let url = originalURL else { return }
+        playerLog.warning(
+            "event=stall_restart viewport=single layout=single reason=\(reason.rawValue, privacy: .public) attempt=\(attempt) restarts=\(self.stallWatchdog.totalRestarts)"
+        )
+        TelemetryReporter.shared.report(
+            deviceCode: DeviceIdentityStore.shared.deviceId,
+            eventType: .liveRecovery,
+            channelId: currentChannelID,
+            streamName: currentRadioName,
+            streamUrl: currentURL?.absoluteString,
+            layoutMode: .single,
+            metadata: [
+                "reason": reason.rawValue,
+                "attempt": attempt.description,
+                "restarts": stallWatchdog.totalRestarts.description,
+            ]
+        )
+        let name = currentRadioName
+        let source = currentSource ?? .remoteCommand
+        let channelID = currentChannelID
+        let medium = currentMedium
+        let attemptCount = recoveryAttempt
+        let probeCount = offlineProbeCount
+        let restoring = (watchdog: stallWatchdog, hasPlayed: hasPlayedSinceStart)
+        Task { [weak self] in
+            await self?.play(
+                urlString: url.absoluteString,
+                radioName: name,
+                source: source,
+                channelID: channelID,
+                medium: medium,
+                restoringRecoveryAttempt: attemptCount,
+                restoringOfflineProbeCount: probeCount,
+                restoringStall: restoring
             )
         }
     }

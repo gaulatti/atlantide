@@ -196,6 +196,8 @@ private struct PlaybackRootView: View {
                 if !appModel.playerController.isUsingKSPlayer {
                     SabellaTVPlayerSurface(player: appModel.playerController.player, gravity: .resizeAspectFill)
                 }
+
+                if playback.isReconnecting { ReconnectingBadge() }
             }
         }
     }
