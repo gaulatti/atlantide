@@ -91,6 +91,41 @@ import Testing
     #expect(CommandStreamReconnectPolicy.next(connectionLifetime: 0, previousBackoff: 0).delay == 1)
 }
 
+@Test func telemetryMetadataEncodesAsTheEndpointTypesIt() throws {
+    let metadata = try #require(TelemetryPrivacy.backendMetadata([
+        "healthy": "true", "recoveryExhausted": "false", "bufferedDurationMs": "1500", "result": "failure",
+    ]))
+    let object = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(metadata)) as? [String: Any])
+    #expect(object["healthy"] as? Bool == true)
+    #expect(object["recoveryExhausted"] as? Bool == false)
+    #expect(object["bufferedDurationMs"] as? Double == 1500)
+    #expect(object["result"] as? String == "failure")
+}
+
+@Test func everyKeyTheEndpointAcceptsIsConvertedAndBounded() {
+    let accepted: [String: String] = [
+        "success": "true", "liveOffsetMs": "-1", "playbackSpeed": "1", "status": "503", "dataType": "media",
+        "recoveryResult": "started", "eventName": "ping", "hardwareDecoders": "2", "softwareDecoders": "0",
+        "hardwareVideoDecoders": "1", "softwareVideoDecoders": "1", "throughputBps": "12",
+    ]
+    let converted = TelemetryPrivacy.backendMetadata(accepted)
+    #expect(converted?.count == accepted.count)
+    #expect(converted?["liveOffsetMs"] == .number(-1))
+    #expect(converted?["success"] == .flag(true))
+    #expect(converted?["dataType"] == .text("media"))
+    // Values outside each key's bounds are dropped.
+    for (key, value) in [("playbackSpeed", "5"), ("liveOffsetMs", "-2"), ("hardwareDecoders", "33"), ("throughputBps", "-1"), ("bytesLoaded", "-3"),
+                         ("success", "yes"), ("dataType", "audio"), ("recoveryResult", "later"), ("eventName", String(repeating: "e", count: 129)),
+                         ("method", String(repeating: "m", count: 17)), ("state", "paused")] {
+        #expect(TelemetryPrivacy.backendMetadata([key: value]) == nil, "\(key)=\(value)")
+    }
+}
+
+@Test func telemetryMetadataIsCappedAtSixteenEntries() {
+    let many = Dictionary(uniqueKeysWithValues: ["healthy", "isPlaying", "recoveryExhausted", "success"].map { ($0, "true") })
+    #expect(TelemetryPrivacy.backendMetadata(many)?.count == 4)
+}
+
 @Test func telemetryMetadataKeepsOnlyWhatTheEndpointAcceptsWithItsTypes() {
     #expect(TelemetryPrivacy.boundedIdentity(String(repeating: "x", count: 200))?.count == 128)
     let health = TelemetryPrivacy.backendMetadata([
