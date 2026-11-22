@@ -39,7 +39,7 @@ struct QuadPlaybackView: View {
                     KSVideoPlayer(coordinator: coordinator, url: url, options: KSOptions()).opacity(player.isUsingKSPlayer ? 1 : 0)
                 }
                 SabellaTVPlayerSurface(player: player.avPlayer).opacity(player.isUsingKSPlayer ? 0 : 1)
-                if player.isReconnecting { ReconnectingBadge() }
+                PlayerReconnectingBadge(player: player)
             }
         } placeholder: {
             if !player.isActive || player.isAudioOnly {
@@ -70,5 +70,14 @@ struct ReconnectingBadge: View {
         }
         .padding(16)
         .allowsHitTesting(false)
+    }
+}
+
+/// Observes the player itself, so the badge appears and clears as its watchdog changes state.
+struct PlayerReconnectingBadge: View {
+    @ObservedObject var player: QuadrantPlayer
+
+    var body: some View {
+        if player.isReconnecting { ReconnectingBadge() }
     }
 }

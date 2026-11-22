@@ -64,7 +64,7 @@ struct EmergencyPlaybackView: View {
                     KSVideoPlayer(coordinator: coordinator, url: url, options: KSOptions()).opacity(player.isUsingKSPlayer ? 1 : 0)
                 }
                 SabellaTVPlayerSurface(player: player.avPlayer).opacity(player.isUsingKSPlayer ? 0 : 1)
-                if player.isReconnecting { ReconnectingBadge() }
+                PlayerReconnectingBadge(player: player)
             }
         } placeholder: {
             if !player.isActive || player.isAudioOnly {

@@ -1138,8 +1138,7 @@ final class PlayerController: NSObject, ObservableObject {
         channelID: String?,
         medium: CelestiChannelMedium,
         restoringRecoveryAttempt: Int? = nil,
-        restoringOfflineProbeCount: Int? = nil,
-        restoringStall: (watchdog: StreamStallWatchdog, hasPlayed: Bool)? = nil
+        restoringOfflineProbeCount: Int? = nil
     ) async {
         guard !Task.isCancelled else { return }
         guard let inputURL = URL(string: urlString) else {
@@ -1148,10 +1147,13 @@ final class PlayerController: NSObject, ObservableObject {
         }
 
         playerLog.log("play: url=\(urlString, privacy: .public) name=\(radioName ?? "nil", privacy: .public) source=\(source == .demo ? "demo" : "remote")")
+        // Every recovery restart passes the attempt it restores; those keep the watchdog's backoff
+        // streak, while a fresh play (a new stream, or the user's) starts it over.
+        let retainedStall = (watchdog: stallWatchdog, hasPlayed: hasPlayedSinceStart)
         stop()
-        if let restoringStall {
-            stallWatchdog = restoringStall.watchdog
-            hasPlayedSinceStart = restoringStall.hasPlayed
+        if restoringRecoveryAttempt != nil {
+            stallWatchdog = retainedStall.watchdog
+            hasPlayedSinceStart = retainedStall.hasPlayed
         }
         let playbackRequest = playbackRequestArbiter.begin()
         audioFallbackApplied = false
@@ -1826,7 +1828,6 @@ final class PlayerController: NSObject, ObservableObject {
         let medium = currentMedium
         let attemptCount = recoveryAttempt
         let probeCount = offlineProbeCount
-        let restoring = (watchdog: stallWatchdog, hasPlayed: hasPlayedSinceStart)
         Task { [weak self] in
             await self?.play(
                 urlString: url.absoluteString,
@@ -1835,8 +1836,7 @@ final class PlayerController: NSObject, ObservableObject {
                 channelID: channelID,
                 medium: medium,
                 restoringRecoveryAttempt: attemptCount,
-                restoringOfflineProbeCount: probeCount,
-                restoringStall: restoring
+                restoringOfflineProbeCount: probeCount
             )
         }
     }
