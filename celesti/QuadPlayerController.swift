@@ -873,7 +873,6 @@ final class QuadrantPlayer: NSObject, ObservableObject {
             eventType: .liveRecovery,
             channelId: currentChannelId,
             streamName: streamName,
-            streamUrl: currentURL?.absoluteString,
             quadrant: quadrant.rawValue,
             layoutMode: telemetryLayoutMode,
             metadata: [
@@ -885,12 +884,14 @@ final class QuadrantPlayer: NSObject, ObservableObject {
         let name = streamName
         let logo = logoURL?.absoluteString
         let channelId = currentChannelId
+        let medium = currentMedium
         Task {
             await play(
                 urlString: url.absoluteString,
                 name: name,
                 logoURLString: logo,
                 channelId: channelId,
+                medium: medium,
                 preserveRecoveryState: true
             )
         }

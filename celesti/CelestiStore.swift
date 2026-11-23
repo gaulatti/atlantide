@@ -1853,7 +1853,6 @@ final class PlayerController: NSObject, ObservableObject {
             eventType: .liveRecovery,
             channelId: currentChannelID,
             streamName: currentRadioName,
-            streamUrl: currentURL?.absoluteString,
             layoutMode: .single,
             metadata: [
                 "reason": reason.rawValue,
