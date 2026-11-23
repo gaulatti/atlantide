@@ -12,6 +12,7 @@ struct EmergencyChannel: Equatable, Identifiable {
     let urlString: String
     let name: String?
     let logoURLString: String?
+    let medium: CelestiChannelMedium
 
     var id: Int { slot }
     var identity: String {
@@ -50,7 +51,8 @@ final class EmergencyPlayerController: ObservableObject {
         channelId: String?,
         urlString: String,
         name: String?,
-        logoURLString: String?
+        logoURLString: String?,
+        medium: CelestiChannelMedium
     ) async {
         guard (0..<8).contains(slot) else {
             emergencyLog.warning("Emergency pool position must be between 0 and 7: \(slot)")
@@ -62,7 +64,8 @@ final class EmergencyPlayerController: ObservableObject {
             channelId: channelId,
             urlString: urlString,
             name: name,
-            logoURLString: logoURLString
+            logoURLString: logoURLString,
+            medium: medium
         )
         if channels[slot] != channel {
             probePlayers.removeValue(forKey: slot)?.stop()
@@ -92,7 +95,8 @@ final class EmergencyPlayerController: ObservableObject {
                 urlString: urlString,
                 name: name,
                 logoURLString: logoURLString,
-                channelId: channelId
+                channelId: channelId,
+                medium: medium
             )
             publishCarouselState()
         } else {
@@ -238,7 +242,8 @@ final class EmergencyPlayerController: ObservableObject {
                     urlString: channel.urlString,
                     name: channel.name,
                     logoURLString: channel.logoURLString,
-                    channelId: channel.channelId
+                    channelId: channel.channelId,
+                    medium: channel.medium
                 )
             }
         }
