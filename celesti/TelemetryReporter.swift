@@ -33,7 +33,6 @@ struct TelemetryEvent: Encodable {
     let eventType: TelemetryEventType
     let channelId: String?
     let streamName: String?
-    let streamUrl: String?
     let quadrant: Int?
     let layoutMode: TelemetryLayoutMode?
     let decoderType: TelemetryDecoderType?
@@ -42,7 +41,7 @@ struct TelemetryEvent: Encodable {
     let errorCode: String?
     let errorReason: String?
     let durationMs: Int?
-    let metadata: [String: String]?
+    let metadata: [String: TelemetryMetadataValue]?
 }
 
 final class TelemetryReporter {
@@ -74,7 +73,6 @@ final class TelemetryReporter {
         eventType: TelemetryEventType,
         channelId: String? = nil,
         streamName: String? = nil,
-        streamUrl: String? = nil,
         quadrant: Int? = nil,
         layoutMode: TelemetryLayoutMode? = nil,
         decoderType: TelemetryDecoderType? = nil,
@@ -93,7 +91,6 @@ final class TelemetryReporter {
             eventType: eventType,
             channelId: TelemetryPrivacy.boundedIdentity(channelId ?? activeChannelId),
             streamName: TelemetryPrivacy.boundedIdentity(streamName),
-            streamUrl: TelemetryPrivacy.sanitizedStreamURL(streamUrl),
             quadrant: quadrant,
             layoutMode: layoutMode,
             decoderType: decoderType,
@@ -102,7 +99,7 @@ final class TelemetryReporter {
             errorCode: errorCode,
             errorReason: errorReason,
             durationMs: durationMs,
-            metadata: TelemetryPrivacy.boundedMetadata(metadata)
+            metadata: TelemetryPrivacy.backendMetadata(metadata)
         )
 
         var request = URLRequest(url: baseURL)
