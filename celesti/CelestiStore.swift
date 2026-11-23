@@ -479,6 +479,14 @@ final class CelestiAppModel: ObservableObject {
         }
     }
 
+    private var telemetryLayoutMode: TelemetryLayoutMode {
+        switch layoutMode {
+        case .single: return .single
+        case .quad: return .quad
+        case .emergency: return .emergency
+        }
+    }
+
     private func handle(command: CelestiCommand) async {
         log.log("Received command: type=\(command.type, privacy: .public) videoId=\(command.videoId ?? "nil", privacy: .public) url=\(command.url ?? "nil", privacy: .public) name=\(command.name ?? command.title ?? "nil", privacy: .public)")
         switch command.type {
@@ -546,15 +554,17 @@ final class CelestiAppModel: ObservableObject {
                 )
             }
         case "stop":
-            if let position = command.quadrant,
-               (0..<8).contains(position),
-               layoutMode == .emergency {
+            switch StopCommandPolicy.route(position: command.quadrant, layout: telemetryLayoutMode) {
+            case .emergencySlot(let position):
                 log.log("Stop command received for emergency pool position \(position)")
                 await emergencyPlayerController.stop(slot: position)
-            } else if let quadrant = Quadrant.from(command.quadrant), layoutMode == .quad {
+            case .quadrant(let index):
+                guard let quadrant = Quadrant.from(index) else { return }
                 log.log("Stop command received for quadrant \(quadrant.rawValue)")
                 quadPlayerController.stop(quadrant: quadrant)
-            } else {
+            case .ignored:
+                log.log("Stop command for a quadrant ignored: the device is not in quad layout")
+            case .everything:
                 log.log("Stop command received")
                 playerController.stop()
                 quadPlayerController.stopAll()
@@ -594,6 +604,8 @@ final class CelestiAppModel: ObservableObject {
             // app-owned lifecycle resource and reconnect from registration instead.
             restartApplication()
         case "layout":
+        // Not sent by Mattone and not handled by the Android TV client (gaulatti/atlantide#31): a legacy
+        // command kept for older senders. Mattone drives quad and emergency through m3u/dash with layoutMode and stop.
             activeChannelGroup = nil
             activeChannelGroupSummary = nil
             activeChannelGroupPage = 0
@@ -612,6 +624,8 @@ final class CelestiAppModel: ObservableObject {
                 emergencyPlayerController.stopAll()
             }
         case "quad":
+        // Not sent by Mattone and not handled by the Android TV client (gaulatti/atlantide#31): a legacy
+        // command kept for older senders. Mattone drives quad and emergency through m3u/dash with layoutMode and stop.
             activeChannelGroup = nil
             activeChannelGroupSummary = nil
             activeChannelGroupPage = 0
@@ -632,6 +646,8 @@ final class CelestiAppModel: ObservableObject {
                 quadrant: quadrant
             )
         case "quad_stop":
+        // Not sent by Mattone and not handled by the Android TV client (gaulatti/atlantide#31): a legacy
+        // command kept for older senders. Mattone drives quad and emergency through m3u/dash with layoutMode and stop.
             guard let quadrant = Quadrant.from(command.quadrant) else {
                 log.error("quad_stop command missing valid quadrant")
                 return

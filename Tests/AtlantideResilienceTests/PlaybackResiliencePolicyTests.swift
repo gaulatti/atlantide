@@ -81,3 +81,23 @@ private func profile(_ preferred: TimeInterval, _ maximum: TimeInterval, _ memor
         lowMemory: lowMemory
     )
 }
+
+@Test func stopCommandRoutesByNamedPositionAndLayout() {
+    // No position: everything, in every layout.
+    for layout in [TelemetryLayoutMode.single, .quad, .emergency] {
+        #expect(StopCommandPolicy.route(position: nil, layout: layout) == .everything)
+    }
+    // Quad: a quadrant stops that quadrant; positions 4 to 7 are not quadrants.
+    #expect((0...3).map { StopCommandPolicy.route(position: $0, layout: .quad) } == (0...3).map { .quadrant($0) })
+    #expect((4...7).map { StopCommandPolicy.route(position: $0, layout: .quad) } == Array(repeating: .everything, count: 4))
+    // Emergency: any of the 8 positions stops that slot, including 0 to 3.
+    #expect((0...7).map { StopCommandPolicy.route(position: $0, layout: .emergency) } == (0...7).map { .emergencySlot($0) })
+    // Single: a quadrant stop never tears down the stream (Mattone sends one before every quad play).
+    #expect((0...3).map { StopCommandPolicy.route(position: $0, layout: .single) } == Array(repeating: .ignored, count: 4))
+    #expect(StopCommandPolicy.route(position: 5, layout: .single) == .everything)
+    // Out of range or negative positions are not slots.
+    for layout in [TelemetryLayoutMode.single, .quad, .emergency] {
+        #expect(StopCommandPolicy.route(position: 8, layout: layout) == .everything)
+        #expect(StopCommandPolicy.route(position: -1, layout: layout) == .everything)
+    }
+}

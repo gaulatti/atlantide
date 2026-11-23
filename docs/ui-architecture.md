@@ -186,3 +186,15 @@ server-side viewing counter and database aggregate.
 Signed Release creation, physical-device installation, production smoke,
 rollback, and the destructive uninstall boundary are documented in
 [`internal-distribution.md`](internal-distribution.md).
+
+## Remote stop routing
+
+A remote `stop` applies where its position says, by the layout the device is in
+(`StopCommandPolicy`), the same as on Android TV: a position 0 to 7 in emergency
+stops that pool slot; a position 0 to 3 in quad stops that quadrant; a position
+0 to 3 in single (or any layout without quadrants) changes nothing, because
+Mattone sends a quadrant stop before every quad play and from "stop this
+quadrant" and it must not end a stream that is not in a quadrant; a stop with
+no position, or a position that is not a slot, stops everything and returns to
+single. The legacy `layout`, `quad` and `quad_stop` commands remain handled but
+are not sent by Mattone.

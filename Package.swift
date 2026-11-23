@@ -33,6 +33,7 @@ let package = Package(
                 "ChannelViewingHistory.swift",
                 "ChannelViewingRuntime.swift",
                 "PlaybackResiliencePolicy.swift",
+                "StopCommandPolicy.swift",
                 "StreamStallWatchdog.swift",
             ]
         ),
